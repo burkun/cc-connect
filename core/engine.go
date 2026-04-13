@@ -226,6 +226,12 @@ type Engine struct {
 	// /web command callbacks
 	webSetupFunc  func() (port int, token string, needRestart bool, err error)
 	webStatusFunc func() (url string)
+
+	// EventBus for centralized event dispatching
+	eventBus *EventBus
+
+	// Outbox for message buffering during disconnections
+	outbox *Outbox
 }
 
 // workspaceInitFlow tracks a channel that is being onboarded to a workspace.
@@ -349,6 +355,8 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		references:            DefaultReferenceRenderCfg(),
 		eventIdleTimeout:      defaultEventIdleTimeout,
 		showContextIndicator:  true,
+		eventBus:              NewEventBus(ctx),
+		outbox:                NewOutbox(DefaultOutboxConfig()),
 	}
 
 	if ag != nil {
@@ -602,6 +610,27 @@ func (e *Engine) SetConfigReloadFunc(fn func() (*ConfigReloadResult, error)) {
 // GetAgent returns the engine's agent (for type assertions like ProviderSwitcher).
 func (e *Engine) GetAgent() Agent {
 	return e.agent
+}
+
+// GetEventBus returns the engine's event bus for subscribing to events.
+func (e *Engine) GetEventBus() *EventBus {
+	return e.eventBus
+}
+
+// GetOutbox returns the engine's outbox for message buffering.
+func (e *Engine) GetOutbox() *Outbox {
+	return e.outbox
+}
+
+// SetOutboxConfig configures the outbox with custom settings.
+func (e *Engine) SetOutboxConfig(config OutboxConfig) {
+	e.outbox = NewOutbox(config)
+}
+
+// SubscribeToEvents is a convenience method to subscribe to event bus events.
+// Returns an unsubscribe function.
+func (e *Engine) SubscribeToEvents(eventType string, listener EventListener) func() {
+	return e.eventBus.Subscribe(eventType, listener)
 }
 
 // AddCommand registers a custom slash command.
@@ -1935,6 +1964,11 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		return
 	}
 
+	// Check and flush any pending outbox messages for this platform.
+	// This handles the case where previous sends failed due to disconnection
+	// and the user has now sent a new message (indicating connection is restored).
+	e.CheckAndFlushOutbox(p, msg.ReplyCtx)
+
 	turnStart := time.Now()
 
 	e.i18n.DetectAndSet(msg.Content)
@@ -2502,6 +2536,17 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		state.mu.Lock()
 		p := state.platform
 		state.mu.Unlock()
+
+		// Emit to EventBus for external subscribers
+		if e.eventBus != nil {
+			e.eventBus.Emit(BusEvent{
+				Event:      event,
+				SessionKey: sessionKey,
+				Platform:   p.Name(),
+				SessionID:  session.ID,
+				Timestamp:  time.Now().UnixMilli(),
+			})
+		}
 
 		switch event.Type {
 		case EventThinking:
@@ -6580,14 +6625,21 @@ func (e *Engine) renderCardForPlatformWorkspace(p Platform, card *Card, workspac
 
 // sendWithError applies outgoing rate limiting and p.Send. It logs wait
 // cancellation and platform failures, and returns a non-nil error on either.
+// On failure, it queues the message to the outbox for later retry.
 func (e *Engine) sendWithError(p Platform, replyCtx any, content string) error {
 	if err := e.waitOutgoing(p); err != nil {
 		slog.Warn("outgoing rate limit: context cancelled", "platform", p.Name(), "error", err)
 		return err
 	}
-	return e.sendAlreadyRenderedWithError(p, replyCtx, content)
+	err := e.sendAlreadyRenderedWithError(p, replyCtx, content)
+	if err != nil && e.outbox != nil {
+		// Queue failed message for retry
+		e.enqueueToOutbox(p, replyCtx, content)
+	}
+	return err
 }
 
+// sendAlreadyRenderedWithError sends content without local-reference rendering.
 func (e *Engine) sendAlreadyRenderedWithError(p Platform, replyCtx any, content string) error {
 	start := time.Now()
 	if err := p.Send(e.ctx, replyCtx, content); err != nil {
@@ -6598,6 +6650,88 @@ func (e *Engine) sendAlreadyRenderedWithError(p Platform, replyCtx any, content 
 		slog.Warn("slow platform send", "platform", p.Name(), "elapsed", elapsed, "content_len", len(content))
 	}
 	return nil
+}
+
+// enqueueToOutbox adds a failed message to the outbox for later retry.
+func (e *Engine) enqueueToOutbox(p Platform, replyCtx any, content string) {
+	if e.outbox == nil || content == "" {
+		return
+	}
+	// Extract session key from reply context if possible
+	var sessionKey string
+	if r, ok := replyCtx.(interface{ GetSessionKey() string }); ok {
+		sessionKey = r.GetSessionKey()
+	}
+	if sessionKey == "" {
+		sessionKey = p.Name() + ":unknown"
+	}
+	e.outbox.Enqueue(content, p.Name(), sessionKey, replyCtx)
+	slog.Info("queued failed message to outbox", "platform", p.Name(), "session_key", sessionKey, "content_len", len(content))
+}
+
+// FlushOutboxForPlatform attempts to send all queued messages for a platform.
+// It uses the provided replyCtxResolver to get reply context for each session key.
+func (e *Engine) FlushOutboxForPlatform(platformName string, replyCtxResolver func(sessionKey string) (any, error)) int {
+	if e.outbox == nil || !e.outbox.HasItemsForPlatform(platformName) {
+		return 0
+	}
+
+	// Find the platform
+	var p Platform
+	for _, plat := range e.platforms {
+		if plat.Name() == platformName {
+			p = plat
+			break
+		}
+	}
+	if p == nil {
+		return 0
+	}
+
+	flushed := e.outbox.FlushForPlatform(platformName, func(item *OutboxItem) error {
+		replyCtx := item.ReplyCtx
+		if replyCtx == nil && replyCtxResolver != nil {
+			var err error
+			replyCtx, err = replyCtxResolver(item.SessionKey)
+			if err != nil {
+				return err
+			}
+		}
+		return p.Send(e.ctx, replyCtx, item.Content)
+	})
+
+	if flushed > 0 {
+		slog.Info("flushed outbox messages", "platform", platformName, "count", flushed)
+	}
+	return flushed
+}
+
+// CheckAndFlushOutbox checks for pending outbox messages and attempts to flush them.
+// This should be called when a new message arrives, before processing the new message.
+func (e *Engine) CheckAndFlushOutbox(p Platform, replyCtx any) {
+	if e.outbox == nil || !e.outbox.HasItemsForPlatform(p.Name()) {
+		return
+	}
+
+	// Use the provided reply context for flushing same-session messages
+	// We only flush if the context is valid (which means connection is working)
+	flushed := e.outbox.FlushForPlatform(p.Name(), func(item *OutboxItem) error {
+		// Try the item's stored reply context first
+		if item.ReplyCtx != nil {
+			if err := p.Send(e.ctx, item.ReplyCtx, item.Content); err == nil {
+				return nil
+			}
+		}
+		// Fall back to the current reply context if same session
+		if item.ReplyCtx == nil && replyCtx != nil {
+			return p.Send(e.ctx, replyCtx, item.Content)
+		}
+		return nil
+	})
+
+	if flushed > 0 {
+		slog.Info("flushed pending outbox messages on new message", "platform", p.Name(), "count", flushed)
+	}
 }
 
 // send wraps p.Send with error logging, slow-operation warnings, and outgoing rate limiting.
@@ -6613,7 +6747,10 @@ func (e *Engine) sendRaw(p Platform, replyCtx any, content string) {
 		slog.Warn("outgoing rate limit: context cancelled", "platform", p.Name(), "error", err)
 		return
 	}
-	_ = e.sendAlreadyRenderedWithError(p, replyCtx, content)
+	err := e.sendAlreadyRenderedWithError(p, replyCtx, content)
+	if err != nil && e.outbox != nil {
+		e.enqueueToOutbox(p, replyCtx, content)
+	}
 }
 
 // drainEvents discards any buffered events from the channel.
@@ -6647,6 +6784,10 @@ func (e *Engine) replyWithError(p Platform, replyCtx any, content string) error 
 	start := time.Now()
 	if err := p.Reply(e.ctx, replyCtx, content); err != nil {
 		slog.Error("platform reply failed", "platform", p.Name(), "error", err, "content_len", len(content))
+		// Queue failed message to outbox for retry
+		if e.outbox != nil {
+			e.enqueueToOutbox(p, replyCtx, content)
+		}
 		return err
 	}
 	if elapsed := time.Since(start); elapsed >= slowPlatformSend {

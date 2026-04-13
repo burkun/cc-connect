@@ -24,6 +24,10 @@ type Session struct {
 	CreatedAt      time.Time      `json:"created_at"`
 	UpdatedAt      time.Time      `json:"updated_at"`
 
+	// Version is incremented on each state change for optimistic concurrency.
+	// Use UpdateWithVersion for atomic updates.
+	Version int64 `json:"version"`
+
 	mu   sync.Mutex `json:"-"`
 	busy bool       `json:"-"`
 }
@@ -63,6 +67,39 @@ func (s *Session) AddHistory(role, content string) {
 		Content:   content,
 		Timestamp: time.Now(),
 	})
+	s.Version++
+}
+
+// GetVersion atomically reads the session version.
+func (s *Session) GetVersion() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.Version
+}
+
+// UpdateWithVersion atomically updates the session with a version check.
+// Returns false if the expected version doesn't match (optimistic lock failure).
+// The update function should modify the session; Version and UpdatedAt are set automatically.
+func (s *Session) UpdateWithVersion(expectedVersion int64, update func(*Session)) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.Version != expectedVersion {
+		return false
+	}
+	update(s)
+	s.Version++
+	s.UpdatedAt = time.Now()
+	return true
+}
+
+// Update atomically updates the session and increments the version.
+// The update function should modify the session; Version and UpdatedAt are set automatically.
+func (s *Session) Update(update func(*Session)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	update(s)
+	s.Version++
+	s.UpdatedAt = time.Now()
 }
 
 // SetAgentInfo atomically sets the agent session ID, agent type, and name.
@@ -489,6 +526,7 @@ func (sm *SessionManager) saveLocked() {
 			History:        append([]HistoryEntry(nil), s.History...),
 			CreatedAt:      s.CreatedAt,
 			UpdatedAt:      s.UpdatedAt,
+			Version:        s.Version,
 		}
 		s.mu.Unlock()
 	}
