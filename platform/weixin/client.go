@@ -261,27 +261,6 @@ func (c *apiClient) getConfig(ctx context.Context, ilinkUserID, contextToken str
 	return &out, nil
 }
 
-// sendGeneratingHeartbeat sends a message_state=GENERATING keepalive message to extend the
-// context_token validity window during long AI processing. The item_list is empty so the
-// message is invisible to the user. The caller should reuse the same clientID for the
-// entire generation period to signal that this is an ongoing update to the same message.
-func (c *apiClient) sendGeneratingHeartbeat(ctx context.Context, to, contextToken, clientID string) error {
-	if strings.TrimSpace(contextToken) == "" {
-		return fmt.Errorf("weixin: sendGeneratingHeartbeat: missing context_token")
-	}
-	msg := sendMessageReq{
-		Msg: weixinOutboundMsg{
-			FromUserID:   "",
-			ToUserID:     to,
-			ClientID:     clientID,
-			MessageType:  messageTypeBot,
-			MessageState: messageStateGenerating,
-			ContextToken: contextToken,
-		},
-	}
-	return c.sendMessage(ctx, &msg)
-}
-
 // sendTyping sends a typing indicator to a user.
 func (c *apiClient) sendTyping(ctx context.Context, ilinkUserID, typingTicket string, status int) error {
 	req := sendTypingReq{

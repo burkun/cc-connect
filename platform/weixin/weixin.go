@@ -36,9 +36,8 @@ const (
 )
 
 type replyContext struct {
-	peerUserID         string
-	contextToken       string
-	generatingClientID string // fixed clientID for GENERATING heartbeat keepalives
+	peerUserID   string
+	contextToken string
 }
 
 // Platform implements core.Platform for Weixin personal chat via the ilink bot HTTP API
@@ -442,9 +441,8 @@ func (p *Platform) dispatchInbound(ctx context.Context, m *weixinMessage, h core
 	}
 
 	rc := &replyContext{
-		peerUserID:         from,
-		contextToken:       strings.TrimSpace(m.ContextToken),
-		generatingClientID: "cc-gen-" + randomHex(6),
+		peerUserID:   from,
+		contextToken: strings.TrimSpace(m.ContextToken),
 	}
 	slog.Info("weixin: created replyContext", "user", from, "context_token_len", len(rc.contextToken))
 	msgID := fmt.Sprintf("%d", m.MessageID)
@@ -540,9 +538,7 @@ func (p *Platform) sendChunks(ctx context.Context, replyCtx any, content string)
 }
 
 // sendChunkWithRetry sends a single chunk with retry mechanism.
-// The GENERATING heartbeat in StartTyping keeps context_token alive, so ret=-2
-// retries just wait briefly and reuse the same token rather than attempting
-// an (ineffective) refresh via getConfig.
+// On ret=-2 (context_token expired), retries after a short delay.
 func (p *Platform) sendChunkWithRetry(ctx context.Context, rc *replyContext, chunk string) error {
 	var lastErr error
 	for attempt := 0; attempt < weixinSendMaxRetries; attempt++ {
@@ -595,7 +591,7 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	if tok == "" {
 		return nil, fmt.Errorf("weixin: no stored context_token for %q (user must message the bot first)", peer)
 	}
-	return &replyContext{peerUserID: peer, contextToken: tok, generatingClientID: "cc-gen-" + randomHex(6)}, nil
+	return &replyContext{peerUserID: peer, contextToken: tok}, nil
 }
 
 // FormattingInstructions implements core.FormattingInstructionProvider.
@@ -642,8 +638,6 @@ func (p *Platform) fetchConfig(ctx context.Context, userID string) string {
 
 // StartTyping implements core.TypingIndicator. It sends a "typing" indicator
 // to the user and repeats every 5 seconds until the returned stop function is called.
-// Along with the typing indicator, it sends a GENERATING heartbeat message to extend
-// the context_token validity window during long AI processing.
 func (p *Platform) StartTyping(ctx context.Context, replyCtx any) (stop func()) {
 	slog.Info("weixin: StartTyping called", "replyCtx_type", fmt.Sprintf("%T", replyCtx))
 
@@ -668,11 +662,6 @@ func (p *Platform) StartTyping(ctx context.Context, replyCtx any) (stop func()) 
 		return func() {}
 	}
 
-	// Send initial GENERATING heartbeat to extend context_token window immediately
-	if err := p.api.sendGeneratingHeartbeat(ctx, rc.peerUserID, rc.contextToken, rc.generatingClientID); err != nil {
-		slog.Warn("weixin: initial generating heartbeat failed", "error", err)
-	}
-
 	done := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(5 * time.Second)
@@ -695,11 +684,6 @@ func (p *Platform) StartTyping(ctx context.Context, replyCtx any) (stop func()) 
 				slog.Info("weixin: sending periodic typing indicator", "user", rc.peerUserID)
 				if err := p.api.sendTyping(ctx, rc.peerUserID, tok, typingStatusTyping); err != nil {
 					slog.Warn("weixin: typing send failed", "error", err)
-					// Don't stop on error, maybe transient
-				}
-				// Send GENERATING heartbeat to keep context_token alive
-				if err := p.api.sendGeneratingHeartbeat(ctx, rc.peerUserID, rc.contextToken, rc.generatingClientID); err != nil {
-					slog.Warn("weixin: generating heartbeat failed", "error", err)
 					// Don't stop on error, maybe transient
 				}
 			}
