@@ -238,3 +238,59 @@ func (c *apiClient) sendText(ctx context.Context, to, text, contextToken, client
 	}
 	return c.sendMessage(ctx, &msg)
 }
+
+// getConfig fetches bot config including typing_ticket for a given user.
+func (c *apiClient) getConfig(ctx context.Context, ilinkUserID, contextToken string) (*getConfigResp, error) {
+	req := getConfigReq{
+		IlinkUserID:  ilinkUserID,
+		ContextToken: contextToken,
+		BaseInfo:     baseInfo{ChannelVersion: channelVersion},
+	}
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := c.post(ctx, "ilink/bot/getconfig", payload, 0, "getConfig")
+	if err != nil {
+		return nil, err
+	}
+	var out getConfigResp
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("weixin: getConfig json: %w", err)
+	}
+	return &out, nil
+}
+
+// sendTyping sends a typing indicator to a user.
+func (c *apiClient) sendTyping(ctx context.Context, ilinkUserID, typingTicket string, status int) error {
+	req := sendTypingReq{
+		IlinkUserID:  ilinkUserID,
+		TypingTicket: typingTicket,
+		Status:       status,
+		BaseInfo:     baseInfo{ChannelVersion: channelVersion},
+	}
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return err
+	}
+	raw, err := c.post(ctx, "ilink/bot/sendtyping", payload, 0, "sendTyping")
+	if err != nil {
+		return err
+	}
+	// sendTyping returns empty body on success, or a simple error response
+	if len(bytes.TrimSpace(raw)) > 0 {
+		var resp struct {
+			Ret     int    `json:"ret"`
+			Errcode int    `json:"errcode"`
+			Errmsg  string `json:"errmsg"`
+		}
+		if err := json.Unmarshal(raw, &resp); err != nil {
+			return nil // ignore unmarshal error, treat as success
+		}
+		if resp.Ret != 0 {
+			return fmt.Errorf("weixin: sendTyping: ret=%d errcode=%d errmsg=%s",
+				resp.Ret, resp.Errcode, resp.Errmsg)
+		}
+	}
+	return nil
+}

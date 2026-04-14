@@ -2,7 +2,33 @@
   "permissions": {
     "allow": [
       "Bash(git add:*)",
-      "Bash(git commit -m ':*)"
+      "Bash(git commit -m ':*)",
+      "Bash(ls:*)",
+      "Bash(gofmt:*)",
+      "Bash(git checkout:*)",
+      "Bash(cat)",
+      "Bash(patch -p1)",
+      "Bash(go build:*)",
+      "Bash(go test:*)",
+      "WebSearch",
+      "Bash(go list:*)",
+      "Bash(go search:*)",
+      "Bash(curl -s \"https://api.github.com/search/repositories?q=markdown+language:Go&sort=stars&order=desc\")",
+      "Bash(go get:*)",
+      "Bash(go run:*)",
+      "Bash(go mod:*)",
+      "Bash(make build:*)",
+      "Bash(mkdir -p ~/.local/bin)",
+      "Bash(cp cc-connect:*)",
+      "Bash(systemctl --user stop cc-connect)",
+      "Bash(systemctl --user start cc-connect)",
+      "Bash(systemctl --user status cc-connect --no-pager)",
+      "Bash(find /data/hft -name \"*.md\" -exec grep -l -i \"context_token\\\\|getConfig\\\\|typing\" {} \\\\;)",
+      "Bash(journalctl --user -u cc-connect --since \"5 minutes ago\" --no-pager)",
+      "Bash(journalctl --user -u cc-connect --since \"10 minutes ago\" --no-pager)",
+      "Bash(systemctl:*)",
+      "Bash(timeout 30 tail -f /data/hft/.cc-connect/cc-connect.log)",
+      "Bash(timeout 60 tail -f /data/hft/.cc-connect/cc-connect.log)"
     ]
   }
 }

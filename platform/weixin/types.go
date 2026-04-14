@@ -143,3 +143,32 @@ type weixinOutboundMsg struct {
 	ItemList     []messageItem `json:"item_list,omitempty"`
 	ContextToken string        `json:"context_token,omitempty"`
 }
+
+// getConfig API types
+type getConfigReq struct {
+	IlinkUserID  string   `json:"ilink_user_id"`
+	ContextToken string   `json:"context_token,omitempty"`
+	BaseInfo     baseInfo `json:"base_info"`
+}
+
+type getConfigResp struct {
+	Ret          int    `json:"ret"`
+	Errcode      int    `json:"errcode"`
+	Errmsg       string `json:"errmsg"`
+	TypingTicket string `json:"typing_ticket,omitempty"`
+	// ContextToken may be returned by the server to refresh the context token
+	ContextToken string `json:"context_token,omitempty"`
+}
+
+// sendTyping API types
+const (
+	typingStatusTyping = 1
+	typingStatusCancel = 2
+)
+
+type sendTypingReq struct {
+	IlinkUserID  string   `json:"ilink_user_id"`
+	TypingTicket string   `json:"typing_ticket,omitempty"`
+	Status       int      `json:"status"`
+	BaseInfo     baseInfo `json:"base_info"`
+}

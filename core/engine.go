@@ -9669,6 +9669,48 @@ func (e *Engine) deleteSessionDisplayName(sessions *SessionManager, matched *Age
 	return displayName
 }
 
+// formatToolJSONInput formats a JSON tool input (like Agent tool parameters)
+// into a human-readable multi-line string for display on messaging platforms.
+func formatToolJSONInput(m map[string]any) string {
+	var lines []string
+
+	// Prioritize common fields in a specific order
+	priorityFields := []string{"description", "prompt", "subagent_type", "command", "file_path", "path"}
+	for _, key := range priorityFields {
+		if val, ok := m[key]; ok {
+			switch v := val.(type) {
+			case string:
+				if v != "" {
+					lines = append(lines, fmt.Sprintf("%s: %s", key, v))
+				}
+			default:
+				lines = append(lines, fmt.Sprintf("%s: %v", key, v))
+			}
+			delete(m, key) // Remove so we don't show again
+		}
+	}
+
+	// Remaining fields
+	for key, val := range m {
+		switch v := val.(type) {
+		case string:
+			if v != "" {
+				lines = append(lines, fmt.Sprintf("%s: %s", key, v))
+			}
+		case bool:
+			lines = append(lines, fmt.Sprintf("%s: %t", key, v))
+		case float64:
+			lines = append(lines, fmt.Sprintf("%s: %v", key, v))
+		default:
+			if b, err := json.Marshal(v); err == nil {
+				lines = append(lines, fmt.Sprintf("%s: %s", key, string(b)))
+			}
+		}
+	}
+
+	return strings.Join(lines, "\n")
+}
+
 // toolCodeLang picks the code block language hint for tool display.
 func toolCodeLang(toolName, input string) string {
 	switch toolName {
