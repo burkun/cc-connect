@@ -12,7 +12,8 @@ const (
 	messageItemFile  = 4
 	messageItemVideo = 5
 
-	messageStateFinish = 2
+	messageStateGenerating = 1
+	messageStateFinish     = 2
 
 	sessionExpiredErrcode = -14
 
@@ -156,8 +157,6 @@ type getConfigResp struct {
 	Errcode      int    `json:"errcode"`
 	Errmsg       string `json:"errmsg"`
 	TypingTicket string `json:"typing_ticket,omitempty"`
-	// ContextToken may be returned by the server to refresh the context token
-	ContextToken string `json:"context_token,omitempty"`
 }
 
 // sendTyping API types

@@ -122,3 +122,55 @@ func containsStrHelper(s, substr string) bool {
 	}
 	return false
 }
+
+func TestReplyContextHasGeneratingClientID(t *testing.T) {
+	rc := &replyContext{
+		peerUserID:         "user1",
+		contextToken:       "tok",
+		generatingClientID: "cc-gen-abc123",
+	}
+	if rc.generatingClientID == "" {
+		t.Fatal("generatingClientID should not be empty")
+	}
+	if !containsStr(rc.generatingClientID, "cc-gen-") {
+		t.Fatalf("generatingClientID should have cc-gen- prefix, got %q", rc.generatingClientID)
+	}
+}
+
+func TestSendGeneratingHeartbeatBuildsCorrectMessage(t *testing.T) {
+	// Verify the message structure built by sendGeneratingHeartbeat
+	msg := sendMessageReq{
+		Msg: weixinOutboundMsg{
+			FromUserID:   "",
+			ToUserID:     "user1",
+			ClientID:     "cc-gen-test",
+			MessageType:  messageTypeBot,
+			MessageState: messageStateGenerating,
+			ContextToken: "test-token",
+		},
+	}
+	if msg.Msg.MessageState != messageStateGenerating {
+		t.Fatalf("expected messageState=%d, got %d", messageStateGenerating, msg.Msg.MessageState)
+	}
+	if msg.Msg.MessageType != messageTypeBot {
+		t.Fatalf("expected messageType=%d, got %d", messageTypeBot, msg.Msg.MessageType)
+	}
+	if msg.Msg.ItemList != nil {
+		t.Fatalf("expected nil ItemList for GENERATING heartbeat, got %v", msg.Msg.ItemList)
+	}
+	if msg.Msg.ClientID != "cc-gen-test" {
+		t.Fatalf("expected ClientID=cc-gen-test, got %q", msg.Msg.ClientID)
+	}
+	if msg.Msg.ContextToken != "test-token" {
+		t.Fatalf("expected ContextToken=test-token, got %q", msg.Msg.ContextToken)
+	}
+}
+
+func TestMessageStateConstants(t *testing.T) {
+	if messageStateGenerating != 1 {
+		t.Fatalf("expected messageStateGenerating=1, got %d", messageStateGenerating)
+	}
+	if messageStateFinish != 2 {
+		t.Fatalf("expected messageStateFinish=2, got %d", messageStateFinish)
+	}
+}

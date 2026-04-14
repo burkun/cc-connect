@@ -36,8 +36,9 @@ const (
 )
 
 type replyContext struct {
-	peerUserID   string
-	contextToken string
+	peerUserID         string
+	contextToken       string
+	generatingClientID string // fixed clientID for GENERATING heartbeat keepalives
 }
 
 // Platform implements core.Platform for Weixin personal chat via the ilink bot HTTP API
@@ -440,7 +441,11 @@ func (p *Platform) dispatchInbound(ctx context.Context, m *weixinMessage, h core
 		return
 	}
 
-	rc := &replyContext{peerUserID: from, contextToken: strings.TrimSpace(m.ContextToken)}
+	rc := &replyContext{
+		peerUserID:         from,
+		contextToken:       strings.TrimSpace(m.ContextToken),
+		generatingClientID: "cc-gen-" + randomHex(6),
+	}
 	slog.Info("weixin: created replyContext", "user", from, "context_token_len", len(rc.contextToken))
 	msgID := fmt.Sprintf("%d", m.MessageID)
 	if m.MessageID == 0 {
@@ -535,7 +540,9 @@ func (p *Platform) sendChunks(ctx context.Context, replyCtx any, content string)
 }
 
 // sendChunkWithRetry sends a single chunk with retry mechanism.
-// When sendMessage returns ret=-2, it tries to get a fresh context_token via getConfig.
+// The GENERATING heartbeat in StartTyping keeps context_token alive, so ret=-2
+// retries just wait briefly and reuse the same token rather than attempting
+// an (ineffective) refresh via getConfig.
 func (p *Platform) sendChunkWithRetry(ctx context.Context, rc *replyContext, chunk string) error {
 	var lastErr error
 	for attempt := 0; attempt < weixinSendMaxRetries; attempt++ {
@@ -545,27 +552,13 @@ func (p *Platform) sendChunkWithRetry(ctx context.Context, rc *replyContext, chu
 			return nil
 		}
 		lastErr = err
-		// Check if error is ret=-2 (API declined) - retry with fresh token
 		if strings.Contains(err.Error(), "ret=-2") {
-			slog.Warn("weixin: sendMessage ret=-2, attempting to refresh context_token",
+			slog.Warn("weixin: sendMessage ret=-2, retrying",
 				"attempt", attempt+1, "peer", rc.peerUserID, "chunk_len", len(chunk))
-			// Add delay before retry
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
 			case <-time.After(weixinSendRetryDelay):
-			}
-
-			// Try to refresh context_token via getConfig
-			p.refreshContextToken(ctx, rc.peerUserID)
-
-			// Refresh context_token from stored tokens (may have been updated by getConfig or new incoming message)
-			freshToken := p.getContextToken(rc.peerUserID)
-			if freshToken != "" && freshToken != rc.contextToken {
-				rc.contextToken = freshToken
-				slog.Info("weixin: using refreshed context_token for retry", "peer", rc.peerUserID)
-			} else {
-				slog.Warn("weixin: no fresh context_token available for retry", "peer", rc.peerUserID, "stored_len", len(freshToken))
 			}
 			continue
 		}
@@ -602,7 +595,7 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	if tok == "" {
 		return nil, fmt.Errorf("weixin: no stored context_token for %q (user must message the bot first)", peer)
 	}
-	return &replyContext{peerUserID: peer, contextToken: tok}, nil
+	return &replyContext{peerUserID: peer, contextToken: tok, generatingClientID: "cc-gen-" + randomHex(6)}, nil
 }
 
 // FormattingInstructions implements core.FormattingInstructionProvider.
@@ -623,10 +616,9 @@ func (p *Platform) getTypingTicket(ctx context.Context, userID string) string {
 	return p.fetchConfig(ctx, userID)
 }
 
-// fetchConfig calls getConfig API and caches the results.
-// Returns the typing_ticket, and also updates context_token if server returns a new one.
+// fetchConfig calls getConfig API and caches the typing_ticket result.
 func (p *Platform) fetchConfig(ctx context.Context, userID string) string {
-	// Get current context_token for this user
+	// Get current context_token for this user (used only as request param)
 	contextToken := p.getContextToken(userID)
 
 	// Fetch typing_ticket via getConfig
@@ -645,59 +637,13 @@ func (p *Platform) fetchConfig(ctx context.Context, userID string) string {
 	p.typingTickets[userID] = resp.TypingTicket
 	p.typingTicketMu.Unlock()
 
-	// If server returned a new context_token, save it too
-	if resp.ContextToken != "" {
-		slog.Info("weixin: getConfig returned new context_token", "user", userID, "context_token_len", len(resp.ContextToken))
-		p.setContextToken(userID, resp.ContextToken)
-	}
-
 	return resp.TypingTicket
-}
-
-// refreshContextToken forces a getConfig call to try to get a fresh context_token.
-// Returns true if a new token was obtained, false otherwise.
-func (p *Platform) refreshContextToken(ctx context.Context, userID string) bool {
-	// Get current context_token for this user
-	oldToken := p.getContextToken(userID)
-
-	// Force fetch config
-	resp, err := p.api.getConfig(ctx, userID, oldToken)
-	if err != nil {
-		slog.Debug("weixin: refreshContextToken getConfig failed", "user", userID, "error", err)
-		return false
-	}
-
-	// Log response for debugging
-	slog.Info("weixin: refreshContextToken getConfig response",
-		"user", userID,
-		"ret", resp.Ret,
-		"watch_typing_ticket", len(resp.TypingTicket) > 0,
-		"watch_context_token", len(resp.ContextToken) > 0)
-
-	if resp.Ret != 0 {
-		return false
-	}
-
-	// If server returned a new context_token, save it
-	if resp.ContextToken != "" && resp.ContextToken != oldToken {
-		slog.Info("weixin: refreshContextToken got new token", "user", userID, "old_len", len(oldToken), "new_len", len(resp.ContextToken))
-		p.setContextToken(userID, resp.ContextToken)
-		return true
-	}
-
-	// Also update typing_ticket if returned
-	if resp.TypingTicket != "" {
-		p.typingTicketMu.Lock()
-		p.typingTickets[userID] = resp.TypingTicket
-		p.typingTicketMu.Unlock()
-	}
-
-	return false
 }
 
 // StartTyping implements core.TypingIndicator. It sends a "typing" indicator
 // to the user and repeats every 5 seconds until the returned stop function is called.
-// This keeps the context_token alive during long AI processing.
+// Along with the typing indicator, it sends a GENERATING heartbeat message to extend
+// the context_token validity window during long AI processing.
 func (p *Platform) StartTyping(ctx context.Context, replyCtx any) (stop func()) {
 	slog.Info("weixin: StartTyping called", "replyCtx_type", fmt.Sprintf("%T", replyCtx))
 
@@ -722,6 +668,11 @@ func (p *Platform) StartTyping(ctx context.Context, replyCtx any) (stop func()) 
 		return func() {}
 	}
 
+	// Send initial GENERATING heartbeat to extend context_token window immediately
+	if err := p.api.sendGeneratingHeartbeat(ctx, rc.peerUserID, rc.contextToken, rc.generatingClientID); err != nil {
+		slog.Warn("weixin: initial generating heartbeat failed", "error", err)
+	}
+
 	done := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(5 * time.Second)
@@ -744,6 +695,11 @@ func (p *Platform) StartTyping(ctx context.Context, replyCtx any) (stop func()) 
 				slog.Info("weixin: sending periodic typing indicator", "user", rc.peerUserID)
 				if err := p.api.sendTyping(ctx, rc.peerUserID, tok, typingStatusTyping); err != nil {
 					slog.Warn("weixin: typing send failed", "error", err)
+					// Don't stop on error, maybe transient
+				}
+				// Send GENERATING heartbeat to keep context_token alive
+				if err := p.api.sendGeneratingHeartbeat(ctx, rc.peerUserID, rc.contextToken, rc.generatingClientID); err != nil {
+					slog.Warn("weixin: generating heartbeat failed", "error", err)
 					// Don't stop on error, maybe transient
 				}
 			}
