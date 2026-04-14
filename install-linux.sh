@@ -196,15 +196,39 @@ check_dependencies() {
 install_from_source() {
     log_info "Building cc-connect from source..."
 
-    local TMP_DIR
-    TMP_DIR=$(mktemp -d)
+    local ORIGINAL_DIR="$PWD"
+    local TMP_DIR=""
+    local NEED_CLEANUP=false
 
-    cd "$TMP_DIR"
-
-    # Clone repository
-    log_info "Cloning repository..."
-    git clone --depth 1 "$REPO_URL" cc-connect
-    cd cc-connect
+    # Check if we're already in a cc-connect source directory
+    if [[ -f "./Makefile" ]] && [[ -f "./go.mod" ]] && [[ -d "./cmd/cc-connect" ]]; then
+        # Check if this is actually cc-connect repo
+        if grep -q "module github.com/chenhg5/cc-connect" ./go.mod 2>/dev/null; then
+            log_info "Detected local cc-connect source directory, building in place..."
+            NEED_CLEANUP=false
+        else
+            # Not cc-connect, need to clone
+            TMP_DIR=$(mktemp -d)
+            cd "$TMP_DIR"
+            log_info "Cloning repository..."
+            git clone --depth 1 "$REPO_URL" cc-connect
+            cd cc-connect
+            NEED_CLEANUP=true
+        fi
+    elif [[ -d "./cc-connect" ]] && [[ -f "./cc-connect/Makefile" ]]; then
+        # Maybe cc-connect is a subdirectory
+        log_info "Found cc-connect subdirectory, building..."
+        cd cc-connect
+        NEED_CLEANUP=false
+    else
+        # Need to clone fresh
+        TMP_DIR=$(mktemp -d)
+        cd "$TMP_DIR"
+        log_info "Cloning repository..."
+        git clone --depth 1 "$REPO_URL" cc-connect
+        cd cc-connect
+        NEED_CLEANUP=true
+    fi
 
     # Build
     log_info "Compiling..."
@@ -219,9 +243,11 @@ install_from_source() {
     # Ensure PATH includes INSTALL_DIR
     ensure_path
 
-    # Cleanup
-    cd -
-    rm -rf "$TMP_DIR"
+    # Cleanup if we cloned
+    if [[ "$NEED_CLEANUP" == "true" ]] && [[ -n "$TMP_DIR" ]]; then
+        cd "$ORIGINAL_DIR"
+        rm -rf "$TMP_DIR"
+    fi
 
     log_success "cc-connect built and installed successfully"
 }
