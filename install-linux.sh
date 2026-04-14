@@ -25,7 +25,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Default settings
-INSTALL_DIR="/usr/local/bin"
+INSTALL_DIR="$HOME/.local/bin"
 CONFIG_DIR="$HOME/.cc-connect"
 DATA_DIR="$HOME/.cc-connect"
 LOG_FILE="$HOME/.cc-connect/cc-connect.log"
@@ -74,11 +74,39 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
-check_root() {
-    if [[ $EUID -ne 0 ]] && [[ "$NO_DAEMON" == "false" ]]; then
-        log_warn "This script may need root privileges for systemd installation."
-        log_info "If prompted, enter your sudo password."
+ensure_path() {
+    # Add INSTALL_DIR to PATH if not already present
+    if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
+        log_info "Adding $INSTALL_DIR to PATH..."
+
+        # Update PATH for current session
+        export PATH="$INSTALL_DIR:$PATH"
+
+        # Persist to shell config
+        local SHELL_RC=""
+        if [[ -f "$HOME/.bashrc" ]]; then
+            SHELL_RC="$HOME/.bashrc"
+        elif [[ -f "$HOME/.zshrc" ]]; then
+            SHELL_RC="$HOME/.zshrc"
+        elif [[ -f "$HOME/.profile" ]]; then
+            SHELL_RC="$HOME/.profile"
+        fi
+
+        if [[ -n "$SHELL_RC" ]]; then
+            # Check if already in shell config
+            if ! grep -q "export PATH=\"\$HOME/.local/bin:\$PATH\"" "$SHELL_RC" 2>/dev/null; then
+                echo "" >> "$SHELL_RC"
+                echo "# Added by cc-connect installer" >> "$SHELL_RC"
+                echo "export PATH=\"\$HOME/.local/bin:\$PATH\"" >> "$SHELL_RC"
+                log_info "Added to $SHELL_RC - run 'source $SHELL_RC' or open a new terminal"
+            fi
+        fi
     fi
+}
+
+check_root() {
+    # No longer needed - everything installs to user directories
+    true
 }
 
 uninstall() {
@@ -91,12 +119,6 @@ uninstall() {
             systemctl --user stop cc-connect
             systemctl --user disable cc-connect
         fi
-
-        if sudo systemctl is-active cc-connect &> /dev/null 2>&1; then
-            log_info "Stopping system-level systemd service..."
-            sudo systemctl stop cc-connect
-            sudo systemctl disable cc-connect
-        fi
     fi
 
     # Remove service files
@@ -105,14 +127,9 @@ uninstall() {
         systemctl --user daemon-reload 2>/dev/null || true
     fi
 
-    if [[ -f "/etc/systemd/system/cc-connect.service" ]]; then
-        sudo rm -f "/etc/systemd/system/cc-connect.service"
-        sudo systemctl daemon-reload 2>/dev/null || true
-    fi
-
     # Remove binary
     if [[ -f "$INSTALL_DIR/cc-connect" ]]; then
-        sudo rm -f "$INSTALL_DIR/cc-connect"
+        rm -f "$INSTALL_DIR/cc-connect"
         log_success "Binary removed from $INSTALL_DIR"
     fi
 
@@ -195,8 +212,12 @@ install_from_source() {
 
     # Install binary
     log_info "Installing binary to $INSTALL_DIR..."
-    sudo cp cc-connect "$INSTALL_DIR/cc-connect"
-    sudo chmod +x "$INSTALL_DIR/cc-connect"
+    mkdir -p "$INSTALL_DIR"
+    cp cc-connect "$INSTALL_DIR/cc-connect"
+    chmod +x "$INSTALL_DIR/cc-connect"
+
+    # Ensure PATH includes INSTALL_DIR
+    ensure_path
 
     # Cleanup
     cd -
@@ -245,7 +266,11 @@ install_from_release() {
     curl -L -o "$TMP_FILE" "$DOWNLOAD_URL"
     chmod +x "$TMP_FILE"
 
-    sudo mv "$TMP_FILE" "$INSTALL_DIR/cc-connect"
+    mkdir -p "$INSTALL_DIR"
+    mv "$TMP_FILE" "$INSTALL_DIR/cc-connect"
+
+    # Ensure PATH includes INSTALL_DIR
+    ensure_path
 
     log_success "cc-connect downloaded and installed successfully"
 }
@@ -466,8 +491,10 @@ main() {
             exit 1
         fi
         if [[ -f "./cc-connect" ]]; then
-            sudo cp ./cc-connect "$INSTALL_DIR/cc-connect"
-            sudo chmod +x "$INSTALL_DIR/cc-connect"
+            mkdir -p "$INSTALL_DIR"
+            cp ./cc-connect "$INSTALL_DIR/cc-connect"
+            chmod +x "$INSTALL_DIR/cc-connect"
+            ensure_path
         fi
     else
         install_from_source
