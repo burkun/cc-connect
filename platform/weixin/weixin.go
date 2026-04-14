@@ -33,9 +33,13 @@ const (
 	weixinSendRetryDelay = 500 * time.Millisecond
 	// weixinChunkSendDelay is the delay between sending message chunks within one sendChunks call.
 	weixinChunkSendDelay = 300 * time.Millisecond
-	// weixinMsgSendDelay is the minimum gap between consecutive sendChunks calls (platform-level).
-	// Keeps us under the server-side rate limit when the AI emits many short messages rapidly.
-	weixinMsgSendDelay = 500 * time.Millisecond
+	// weixinMsgSendDelay is the minimum gap between consecutive actual API sends.
+	weixinMsgSendDelay = 800 * time.Millisecond
+	// weixinCoalesceWindow is how long to buffer incoming messages waiting for more to arrive.
+	// Short messages that arrive within this window are merged into one API call.
+	weixinCoalesceWindow = 600 * time.Millisecond
+	// weixinCoalesceMaxLen is the max rune count before flushing the coalesce buffer early.
+	weixinCoalesceMaxLen = 1000
 )
 
 type replyContext struct {
@@ -82,10 +86,14 @@ type Platform struct {
 	typingTicketMu sync.RWMutex
 	typingTickets  map[string]string // key: ilink_user_id, value: typing_ticket
 
-	// sendMu serialises outbound sendChunks calls to avoid triggering the
-	// server-side rate limit when the AI emits many short messages in rapid succession.
+	// sendMu serialises all outbound API sends.
+	// coalesceBuf buffers incoming messages so that short segments arriving in rapid
+	// succession (e.g. one per tool call) are merged into a single API call, keeping
+	// the total message count low and avoiding the server-side rate limit.
 	sendMu       sync.Mutex
 	lastSendTime time.Time
+	coalesceBuf  map[string]*coalesceBucket // key: peerUserID
+	coalesceMu   sync.Mutex
 }
 
 func sanitizePathSegment(s string) string {
@@ -502,11 +510,118 @@ func randomHex(n int) string {
 }
 
 func (p *Platform) Reply(ctx context.Context, replyCtx any, content string) error {
-	return p.sendChunks(ctx, replyCtx, content)
+	return p.enqueueCoalesce(ctx, replyCtx, content)
 }
 
 func (p *Platform) Send(ctx context.Context, replyCtx any, content string) error {
 	return p.sendChunks(ctx, replyCtx, content)
+}
+
+// coalesceBucket buffers outgoing text for one peer so that many small segments
+// (one per tool call) are merged into fewer, larger API sends.
+type coalesceBucket struct {
+	mu       sync.Mutex
+	parts    []string
+	replyCtx any
+	timer    *time.Timer
+	flush    func() // called by the timer to drain the bucket
+}
+
+func (b *coalesceBucket) add(content string, rc any) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.parts = append(b.parts, content)
+	if b.replyCtx == nil {
+		b.replyCtx = rc
+	}
+	// Reset the coalesce window on every new arrival.
+	if b.timer != nil {
+		b.timer.Reset(weixinCoalesceWindow)
+	}
+}
+
+func (b *coalesceBucket) drain() (string, any) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.parts) == 0 {
+		return "", nil
+	}
+	merged := strings.Join(b.parts, "\n")
+	b.parts = nil
+	rc := b.replyCtx
+	b.replyCtx = nil
+	return merged, rc
+}
+
+func (b *coalesceBucket) runeLen() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	n := 0
+	for _, s := range b.parts {
+		n += len([]rune(s))
+	}
+	return n
+}
+
+// enqueueCoalesce adds content to the per-peer coalesce buffer. If the buffer
+// fills up (weixinCoalesceMaxLen) the flush happens immediately; otherwise a
+// timer fires after weixinCoalesceWindow and flushes whatever has accumulated.
+func (p *Platform) enqueueCoalesce(ctx context.Context, replyCtx any, content string) error {
+	rc, ok := replyCtx.(*replyContext)
+	if !ok || rc == nil {
+		// Non-replyContext sends (e.g. proactive) bypass coalescing.
+		return p.sendChunks(ctx, replyCtx, content)
+	}
+
+	p.coalesceMu.Lock()
+	if p.coalesceBuf == nil {
+		p.coalesceBuf = make(map[string]*coalesceBucket)
+	}
+	bucket, exists := p.coalesceBuf[rc.peerUserID]
+	if !exists {
+		bucket = &coalesceBucket{}
+		p.coalesceBuf[rc.peerUserID] = bucket
+	}
+	p.coalesceMu.Unlock()
+
+	bucket.add(content, replyCtx)
+
+	// If the buffer is large enough, flush immediately.
+	if bucket.runeLen() >= weixinCoalesceMaxLen {
+		if bucket.timer != nil {
+			bucket.timer.Stop()
+		}
+		merged, rctx := bucket.drain()
+		if merged != "" {
+			return p.sendChunks(ctx, rctx, merged)
+		}
+		return nil
+	}
+
+	// Otherwise arm/reset the timer.
+	bucket.mu.Lock()
+	if bucket.timer == nil {
+		// Capture for closure.
+		peerID := rc.peerUserID
+		bucket.timer = time.AfterFunc(weixinCoalesceWindow, func() {
+			p.coalesceMu.Lock()
+			b, ok := p.coalesceBuf[peerID]
+			p.coalesceMu.Unlock()
+			if !ok {
+				return
+			}
+			merged, rctx := b.drain()
+			if merged == "" {
+				return
+			}
+			if err := p.sendChunks(context.Background(), rctx, merged); err != nil {
+				slog.Warn("weixin: coalesce flush failed", "peer", peerID, "error", err)
+			}
+		})
+	}
+	bucket.mu.Unlock()
+
+	return nil
 }
 
 func (p *Platform) sendChunks(ctx context.Context, replyCtx any, content string) error {
