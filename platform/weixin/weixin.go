@@ -31,8 +31,11 @@ const (
 	weixinSendMaxRetries = 3
 	// weixinSendRetryDelay is the delay between retries when sendMessage fails.
 	weixinSendRetryDelay = 500 * time.Millisecond
-	// weixinChunkSendDelay is the delay between sending message chunks to avoid rate limiting.
-	weixinChunkSendDelay = 100 * time.Millisecond
+	// weixinChunkSendDelay is the delay between sending message chunks within one sendChunks call.
+	weixinChunkSendDelay = 300 * time.Millisecond
+	// weixinMsgSendDelay is the minimum gap between consecutive sendChunks calls (platform-level).
+	// Keeps us under the server-side rate limit when the AI emits many short messages rapidly.
+	weixinMsgSendDelay = 500 * time.Millisecond
 )
 
 type replyContext struct {
@@ -78,6 +81,11 @@ type Platform struct {
 	// typing ticket cache: per-user typing_ticket from getConfig
 	typingTicketMu sync.RWMutex
 	typingTickets  map[string]string // key: ilink_user_id, value: typing_ticket
+
+	// sendMu serialises outbound sendChunks calls to avoid triggering the
+	// server-side rate limit when the AI emits many short messages in rapid succession.
+	sendMu       sync.Mutex
+	lastSendTime time.Time
 }
 
 func sanitizePathSegment(s string) string {
@@ -506,6 +514,23 @@ func (p *Platform) sendChunks(ctx context.Context, replyCtx any, content string)
 	if !ok || rc == nil {
 		return fmt.Errorf("weixin: invalid reply context")
 	}
+
+	// Serialise all outbound sends and enforce a minimum inter-message gap to
+	// avoid triggering the server-side rate limit.
+	p.sendMu.Lock()
+	if wait := weixinMsgSendDelay - time.Since(p.lastSendTime); wait > 0 {
+		select {
+		case <-ctx.Done():
+			p.sendMu.Unlock()
+			return ctx.Err()
+		case <-time.After(wait):
+		}
+	}
+	defer func() {
+		p.lastSendTime = time.Now()
+		p.sendMu.Unlock()
+	}()
+
 	// Always prefer the freshest stored token — the user may have sent a new message
 	// during AI processing, which updates the store with a newer context_token.
 	if fresh := p.getContextToken(rc.peerUserID); fresh != "" {
