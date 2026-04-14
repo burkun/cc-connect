@@ -506,8 +506,10 @@ func (p *Platform) sendChunks(ctx context.Context, replyCtx any, content string)
 	if !ok || rc == nil {
 		return fmt.Errorf("weixin: invalid reply context")
 	}
-	if strings.TrimSpace(rc.contextToken) == "" {
-		rc.contextToken = p.getContextToken(rc.peerUserID)
+	// Always prefer the freshest stored token — the user may have sent a new message
+	// during AI processing, which updates the store with a newer context_token.
+	if fresh := p.getContextToken(rc.peerUserID); fresh != "" {
+		rc.contextToken = fresh
 	}
 	slog.Info("weixin: sendChunks starting", "peer", rc.peerUserID, "token_len", len(rc.contextToken), "content_len", len(content))
 	if strings.TrimSpace(rc.contextToken) == "" {
