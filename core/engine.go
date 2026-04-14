@@ -8303,9 +8303,13 @@ func (e *Engine) cmdCronAdd(p Platform, msg *Message, args []string) {
 
 	cronExpr := strings.Join(args[:5], " ")
 	prompt := strings.Join(args[5:], " ")
-
+	cronID, err := GenerateCronID()
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
+		return
+	}
 	job := &CronJob{
-		ID:         GenerateCronID(),
+		ID:         cronID,
 		Project:    e.name,
 		SessionKey: msg.SessionKey,
 		CronExpr:   cronExpr,
@@ -8336,9 +8340,13 @@ func (e *Engine) cmdCronAddExec(p Platform, msg *Message, args []string) {
 
 	cronExpr := strings.Join(args[:5], " ")
 	shellCmd := strings.Join(args[5:], " ")
-
+	cronID, err := GenerateCronID()
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
+		return
+	}
 	job := &CronJob{
-		ID:         GenerateCronID(),
+		ID:         cronID,
 		Project:    e.name,
 		SessionKey: msg.SessionKey,
 		CronExpr:   cronExpr,

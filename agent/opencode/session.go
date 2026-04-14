@@ -400,6 +400,25 @@ func (s *opencodeSession) Close() error {
 	return nil
 }
 
+// ForceClose immediately terminates any running processes.
+// Use this after Close() times out to prevent zombie processes.
+func (s *opencodeSession) ForceClose() error {
+	s.alive.Store(false)
+	s.cancel()
+	// Wait briefly for cleanup
+	done := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+	}
+	close(s.events)
+	return nil
+}
+
 func truncate(s string, maxRunes int) string {
 	if utf8.RuneCountInString(s) <= maxRunes {
 		return s

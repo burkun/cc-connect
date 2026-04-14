@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 type rpcOutcome struct {
@@ -47,6 +48,9 @@ type transport struct {
 	onNotif rpcNotifyHandler
 	onReq   rpcRequestHandler
 }
+
+// rpcCallTimeout is the maximum time to wait for a response before cleaning up.
+const rpcCallTimeout = 30 * time.Second
 
 func newTransport(in io.Reader, out io.Writer, onNotif rpcNotifyHandler, onReq rpcRequestHandler) *transport {
 	return &transport{
@@ -175,6 +179,21 @@ func (t *transport) call(ctx context.Context, method string, params any) (json.R
 	t.pendingMu.Lock()
 	t.pending[key] = ch
 	t.pendingMu.Unlock()
+
+	// Ensure cleanup on timeout to prevent memory leak
+	go func() {
+		select {
+		case <-time.After(rpcCallTimeout):
+			t.pendingMu.Lock()
+			delete(t.pending, key)
+			t.pendingMu.Unlock()
+			select {
+			case ch <- rpcOutcome{err: &rpcErrPayload{Code: -32000, Message: "rpc call timeout"}}:
+			default:
+			}
+		case <-ctx.Done():
+		}
+	}()
 
 	req := map[string]any{
 		"jsonrpc": "2.0",

@@ -296,7 +296,13 @@ func (p *WSPlatform) handleFrame(frame wsFrame) {
 				slog.Debug("wecom-ws: reply/send ack ok", "req_id", reqID)
 			}
 			if ch, ok := p.pendingAcks.LoadAndDelete(reqID); ok {
-				ch.(chan error) <- ackErr
+				if errCh, ok := ch.(chan error); ok {
+					select {
+					case errCh <- ackErr:
+					default:
+						// Channel full or closed, drop the ack
+					}
+				}
 			}
 		}
 	default:

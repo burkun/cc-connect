@@ -678,12 +678,12 @@ type mutePlatform struct {
 func (m *mutePlatform) Reply(_ context.Context, _ any, _ string) error { return nil }
 func (m *mutePlatform) Send(_ context.Context, _ any, _ string) error  { return nil }
 
-func GenerateCronID() string {
+func GenerateCronID() (string, error) {
 	b := make([]byte, 4)
 	if _, err := rand.Read(b); err != nil {
-		panic(fmt.Errorf("generate cron id: %w", err))
+		return "", fmt.Errorf("generate cron id: %w", err)
 	}
-	return hex.EncodeToString(b)
+	return hex.EncodeToString(b), nil
 }
 
 func truncateStr(s string, n int) string {

@@ -283,8 +283,13 @@ func (s *APIServer) handleCronAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	cronID, err := GenerateCronID()
+	if err != nil {
+		http.Error(w, "failed to generate cron ID: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	job := &CronJob{
-		ID:          GenerateCronID(),
+		ID:          cronID,
 		Project:     project,
 		SessionKey:  sessionKey,
 		CronExpr:    req.CronExpr,

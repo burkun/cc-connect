@@ -264,7 +264,9 @@ func providerCacheKey(p core.ProviderConfig) string {
 
 func mustWriteProviderSignaturePart(w io.Writer, key, value string) {
 	if err := writeProviderSignaturePart(w, key, value); err != nil {
-		panic(fmt.Sprintf("write provider signature: %v", err))
+		// This should never happen when writing to a hash.Hash,
+		// but log the error instead of panicking to avoid service crash.
+		slog.Error("opencode: write provider signature failed", "key", key, "error", err)
 	}
 }
 
