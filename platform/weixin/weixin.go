@@ -35,6 +35,10 @@ const (
 	weixinChunkSendDelay = 300 * time.Millisecond
 	// weixinMsgSendDelay is the minimum gap between consecutive actual API sends.
 	weixinMsgSendDelay = 800 * time.Millisecond
+	// typingTicketTTL is how long a cached typing ticket remains valid.
+	typingTicketTTL = 10 * time.Minute
+	// typingRepeatInterval is how often to resend the typing status to keep it alive.
+	typingRepeatInterval = 5 * time.Second
 )
 
 type replyContext struct {
@@ -78,12 +82,17 @@ type Platform struct {
 	tokensPath string
 
 	// typing ticket cache: per-user typing_ticket from getConfig
-	typingTicketMu sync.RWMutex
-	typingTickets  map[string]string // key: ilink_user_id, value: typing_ticket
+	typingMu        sync.RWMutex
+	typingTickets   map[string]typingTicketEntry // peerUserID → cached ticket
 
 	// sendMu serialises all outbound API sends.
 	sendMu       sync.Mutex
 	lastSendTime time.Time
+}
+
+type typingTicketEntry struct {
+	ticket    string
+	fetchedAt time.Time
 }
 
 func sanitizePathSegment(s string) string {
@@ -172,7 +181,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		cdnHttpClient: cdnHttpClient,
 		tokens:        make(map[string]string),
 		dedup:         make(map[string]time.Time),
-		typingTickets: make(map[string]string),
+			typingTickets: make(map[string]typingTicketEntry),
 	}
 	p.api = newAPIClient(baseURL, token, routeTag, httpClient)
 
@@ -430,13 +439,13 @@ func (p *Platform) dispatchInbound(ctx context.Context, m *weixinMessage, h core
 	p.dedup[dedupKey] = now
 	p.dedupMu.Unlock()
 
-	if tok := strings.TrimSpace(m.ContextToken); tok != "" {
-		slog.Info("weixin: received context_token from message", "user", from, "token_len", len(tok))
-		p.setContextToken(from, tok)
-	} else {
-		slog.Warn("weixin: message has no context_token", "user", from)
-	}
-
+		if tok := strings.TrimSpace(m.ContextToken); tok != "" {
+			slog.Info("weixin: received context_token from message", "user", from, "token_len", len(tok))
+			p.setContextToken(from, tok)
+			p.refreshTypingTicket(ctx, from, tok)
+		} else {
+			slog.Warn("weixin: message has no context_token", "user", from)
+		}
 	body := bodyFromItemList(m.ItemList)
 	images, files, audio := p.collectInboundMedia(ctx, m.ItemList)
 	if strings.TrimSpace(body) == "" && len(images) == 0 && len(files) == 0 && audio == nil && mediaOnlyItems(m.ItemList) {
@@ -505,6 +514,101 @@ func (p *Platform) Reply(ctx context.Context, replyCtx any, content string) erro
 
 func (p *Platform) Send(ctx context.Context, replyCtx any, content string) error {
 	return p.sendChunks(ctx, replyCtx, content)
+}
+
+// StartTyping sends a typing indicator to the peer and repeats every few seconds
+// until the returned stop function is called. Implements core.TypingIndicator.
+func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
+	rc, ok := rctx.(*replyContext)
+	if !ok || rc == nil {
+		return func() {}
+	}
+	peerID := rc.peerUserID
+	contextToken := rc.contextToken
+	if strings.TrimSpace(contextToken) == "" {
+		contextToken = p.getContextToken(peerID)
+	}
+
+	ticket := p.getTypingTicket(ctx, peerID, contextToken)
+	if ticket == "" {
+		return func() {}
+	}
+
+	if err := p.api.sendTyping(ctx, peerID, ticket, typingStatusStart); err != nil {
+		slog.Debug("weixin: initial typing start failed", "peer", peerID, "error", err)
+		return func() {}
+	}
+
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(typingRepeatInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				// Best-effort stop; use background context since ctx may already be cancelled.
+				stopCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				if err := p.api.sendTyping(stopCtx, peerID, ticket, typingStatusStop); err != nil {
+					slog.Debug("weixin: typing stop failed", "peer", peerID, "error", err)
+				}
+				cancel()
+				return
+			case <-ctx.Done():
+				stopCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				if err := p.api.sendTyping(stopCtx, peerID, ticket, typingStatusStop); err != nil {
+					slog.Debug("weixin: typing stop failed (ctx cancelled)", "peer", peerID, "error", err)
+				}
+				cancel()
+				return
+			case <-ticker.C:
+				if err := p.api.sendTyping(ctx, peerID, ticket, typingStatusStart); err != nil {
+					slog.Debug("weixin: typing repeat failed", "peer", peerID, "error", err)
+					bestEffortCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+					_ = p.api.sendTyping(bestEffortCtx, peerID, ticket, typingStatusStop)
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+
+	return func() { close(done) }
+}
+
+// getTypingTicket returns a cached typing ticket for the peer, fetching one
+// from the getconfig API if the cache is empty or expired.
+func (p *Platform) getTypingTicket(ctx context.Context, peerID, contextToken string) string {
+	p.typingMu.RLock()
+	entry, ok := p.typingTickets[peerID]
+	p.typingMu.RUnlock()
+	if ok && time.Since(entry.fetchedAt) < typingTicketTTL {
+		return entry.ticket
+	}
+
+	resp, err := p.api.getConfig(ctx, peerID, contextToken)
+	if err != nil {
+		slog.Debug("weixin: getConfig for typing ticket failed", "peer", peerID, "error", err)
+		return ""
+	}
+	ticket := strings.TrimSpace(resp.TypingTicket)
+	if ticket == "" {
+		return ""
+	}
+
+	p.typingMu.Lock()
+	p.typingTickets[peerID] = typingTicketEntry{ticket: ticket, fetchedAt: time.Now()}
+	p.typingMu.Unlock()
+	return ticket
+}
+
+// refreshTypingTicket proactively fetches and caches a typing ticket when a
+// message is received, so that StartTyping can use it without an extra round-trip.
+func (p *Platform) refreshTypingTicket(ctx context.Context, peerID, contextToken string) {
+	go func() {
+		fetchCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		p.getTypingTicket(fetchCtx, peerID, contextToken)
+	}()
 }
 
 func (p *Platform) sendChunks(ctx context.Context, replyCtx any, content string) error {
@@ -622,100 +726,6 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 // FormattingInstructions implements core.FormattingInstructionProvider.
 func (p *Platform) FormattingInstructions() string {
 	return "Replies are delivered as plain text to Weixin. Avoid markdown tables; use short paragraphs."
-}
-
-// getTypingTicket returns the cached typing_ticket for a user, or fetches it via getConfig.
-// Also attempts to refresh context_token if the server returns a new one.
-func (p *Platform) getTypingTicket(ctx context.Context, userID string) string {
-	p.typingTicketMu.RLock()
-	if tok, ok := p.typingTickets[userID]; ok && tok != "" {
-		p.typingTicketMu.RUnlock()
-		return tok
-	}
-	p.typingTicketMu.RUnlock()
-
-	return p.fetchConfig(ctx, userID)
-}
-
-// fetchConfig calls getConfig API and caches the typing_ticket result.
-func (p *Platform) fetchConfig(ctx context.Context, userID string) string {
-	// Get current context_token for this user (used only as request param)
-	contextToken := p.getContextToken(userID)
-
-	// Fetch typing_ticket via getConfig
-	resp, err := p.api.getConfig(ctx, userID, contextToken)
-	if err != nil {
-		slog.Debug("weixin: getConfig failed", "user", userID, "error", err)
-		return ""
-	}
-	if resp.Ret != 0 || resp.TypingTicket == "" {
-		slog.Debug("weixin: getConfig no typing_ticket", "user", userID, "ret", resp.Ret)
-		return ""
-	}
-
-	// Save typing_ticket
-	p.typingTicketMu.Lock()
-	p.typingTickets[userID] = resp.TypingTicket
-	p.typingTicketMu.Unlock()
-
-	return resp.TypingTicket
-}
-
-// StartTyping implements core.TypingIndicator. It sends a "typing" indicator
-// to the user and repeats every 5 seconds until the returned stop function is called.
-func (p *Platform) StartTyping(ctx context.Context, replyCtx any) (stop func()) {
-	slog.Info("weixin: StartTyping called", "replyCtx_type", fmt.Sprintf("%T", replyCtx))
-
-	rc, ok := replyCtx.(*replyContext)
-	if !ok || rc == nil {
-		slog.Warn("weixin: StartTyping type assertion failed", "ok", ok, "nil", rc == nil)
-		return func() {}
-	}
-
-	// Get typing_ticket for this user
-	typingTicket := p.getTypingTicket(ctx, rc.peerUserID)
-	if typingTicket == "" {
-		slog.Debug("weixin: no typing_ticket available", "user", rc.peerUserID)
-		return func() {}
-	}
-
-	slog.Info("weixin: sending initial typing indicator", "user", rc.peerUserID, "ticket_len", len(typingTicket))
-
-	// Send initial typing indicator
-	if err := p.api.sendTyping(ctx, rc.peerUserID, typingTicket, typingStatusTyping); err != nil {
-		slog.Warn("weixin: initial typing send failed", "error", err)
-		return func() {}
-	}
-
-	done := make(chan struct{})
-	go func() {
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-done:
-				// Send cancel typing on stop
-				_ = p.api.sendTyping(context.Background(), rc.peerUserID, typingTicket, typingStatusCancel)
-				return
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				// Refresh typing_ticket periodically in case it expired
-				tok := p.getTypingTicket(ctx, rc.peerUserID)
-				if tok == "" {
-					slog.Warn("weixin: typing ticket expired, stopping", "user", rc.peerUserID)
-					return
-				}
-				slog.Info("weixin: sending periodic typing indicator", "user", rc.peerUserID)
-				if err := p.api.sendTyping(ctx, rc.peerUserID, tok, typingStatusTyping); err != nil {
-					slog.Warn("weixin: typing send failed", "error", err)
-					// Don't stop on error, maybe transient
-				}
-			}
-		}
-	}()
-
-	return func() { close(done) }
 }
 
 var (

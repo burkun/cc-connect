@@ -20,6 +20,9 @@ const (
 	uploadMediaImage = 1
 	uploadMediaVideo = 2
 	uploadMediaFile  = 3
+
+	typingStatusStart = 1
+	typingStatusStop  = 2
 )
 
 type baseInfo struct {
