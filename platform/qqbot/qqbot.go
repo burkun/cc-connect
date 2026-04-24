@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -33,7 +34,6 @@ const (
 	maxReconnectAttempts = 30
 	tokenRefreshMargin   = 5 * time.Minute
 	messageMaxLen        = 2000
-	msgSeqTTL            = 5 * time.Minute
 	messageCacheTTL      = 7 * 24 * time.Hour
 	messageCacheMaxItems = 1000
 	quotedTextMaxRunes   = 800
@@ -89,20 +89,18 @@ type Platform struct {
 	// Message dedup
 	dedup core.MessageDedup
 
-	// msg_seq counter per event msg_id (for multiple replies to same event)
-	msgSeqMu  sync.Mutex
-	msgSeqMap map[string]*msgSeqEntry
+	// msg_seq generation: random values avoid API dedup collisions
+	// (sequential counters collide when msg_seq resets on new user messages)
 
 	messageCacheMu   sync.Mutex
 	messageCache     map[string]cachedMessage
 	messageCachePath string
 }
 
-// msgSeqEntry tracks msg_seq counter with a creation timestamp for TTL eviction.
-type msgSeqEntry struct {
-	seq       atomic.Int32
-	createdAt time.Time
-}
+// msgSeqRandomMax is the upper bound for random msg_seq values.
+// Random values prevent dedup collisions when the QQ API deduplicates
+// based on (user, msg_seq) rather than (msg_id, msg_seq).
+const msgSeqRandomMax = 1_000_000
 
 type cachedMessage struct {
 	Content   string    `json:"content"`
@@ -374,6 +372,62 @@ func (p *Platform) apiRequestJSON(method, url string, body any, result any) erro
 }
 
 var _ core.ImageSender = (*Platform)(nil)
+
+// StartTyping sends a C2C input-notify to show "Bot is typing..." in the
+// user's chat. The QQ Bot API only supports typing indicators for private
+// chat (C2C), not for group messages. A goroutine is spawned to resend the
+// typing notification every 50 seconds (QQ API max is 60s) until stop is called.
+// Implements core.TypingIndicator.
+func (p *Platform) StartTyping(ctx context.Context, rctxAny any) (stop func()) {
+	rctx, ok := rctxAny.(*replyContext)
+	if !ok || rctx.messageType != "c2c" || rctx.userOpenID == "" {
+		return func() {}
+	}
+
+	done := make(chan struct{})
+
+	// Send the first typing notification immediately.
+	p.sendC2CInputNotify(rctx)
+
+	// Resend every 50s (QQ API input_second max is 60, leave 10s margin).
+	go func() {
+		ticker := time.NewTicker(50 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				p.sendC2CInputNotify(rctx)
+			}
+		}
+	}()
+
+	return func() { close(done) }
+}
+
+// sendC2CInputNotify sends a C2C input-notify (msg_type 6) to show the
+// "Bot is typing..." status for the user. Errors are logged but not propagated
+// since typing is a best-effort UX hint.
+func (p *Platform) sendC2CInputNotify(rctx *replyContext) {
+	url := fmt.Sprintf("%s/v2/users/%s/messages", p.apiBase(), rctx.userOpenID)
+	body := map[string]any{
+		"msg_type": 6,
+		"input_notify": map[string]any{
+			"input_type":   1,
+			"input_second": 60,
+		},
+		"msg_seq": p.nextMsgSeq(rctx.eventMsgID),
+	}
+	if rctx.eventMsgID != "" {
+		body["msg_id"] = rctx.eventMsgID
+	}
+	if err := p.apiRequest("POST", url, body); err != nil {
+		slog.Debug("qqbot: send typing notify failed", "error", err)
+	}
+}
+
+var _ core.TypingIndicator = (*Platform)(nil)
 
 // SendFile uploads and sends a file via QQ Bot rich media API.
 // Implements core.FileSender.
@@ -1133,28 +1187,12 @@ func (p *Platform) sendMessage(rctx *replyContext, content string) error {
 	return nil
 }
 
+// nextMsgSeq returns a random message sequence number.
+// Using random values prevents deduplication errors when the QQ Bot API
+// deduplicates based on (user_openid, msg_seq) instead of (msg_id, msg_seq).
+// The eventMsgID parameter is retained for API compatibility but not used.
 func (p *Platform) nextMsgSeq(eventMsgID string) int32 {
-	p.msgSeqMu.Lock()
-	defer p.msgSeqMu.Unlock()
-
-	if p.msgSeqMap == nil {
-		p.msgSeqMap = make(map[string]*msgSeqEntry)
-	}
-
-	// Evict expired entries
-	now := time.Now()
-	for k, v := range p.msgSeqMap {
-		if now.Sub(v.createdAt) > msgSeqTTL {
-			delete(p.msgSeqMap, k)
-		}
-	}
-
-	entry, ok := p.msgSeqMap[eventMsgID]
-	if !ok {
-		entry = &msgSeqEntry{createdAt: now}
-		p.msgSeqMap[eventMsgID] = entry
-	}
-	return entry.seq.Add(1)
+	return rand.Int31n(msgSeqRandomMax) + 1 // 1 to msgSeqRandomMax
 }
 
 // ---------------------------------------------------------------------------
