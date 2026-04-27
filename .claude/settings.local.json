@@ -25,7 +25,8 @@
       "Bash(python3 /tmp/fix_types.py)",
       "Bash(python3 /tmp/fix_client.py)",
       "Bash(python3 /tmp/fix_weixin_dup.py)",
-      "Bash(git commit *)"
+      "Bash(git commit *)",
+      "Bash(go test *)"
     ]
   }
 }
