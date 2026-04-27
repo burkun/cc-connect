@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"math/rand"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -47,6 +48,16 @@ var (
 	apiBaseSandbox    = "https://sandbox.api.sgroup.qq.com"
 	tokenURL          = "https://bots.qq.com/app/getAppAccessToken"
 )
+
+// wsDialer is a custom WebSocket dialer with TCP keepalive and timeout settings
+// to improve connection stability and detect dead connections faster.
+var wsDialer = &websocket.Dialer{
+	HandshakeTimeout: 15 * time.Second,
+	NetDialContext: (&net.Dialer{
+		Timeout:   15 * time.Second,
+		KeepAlive: 30 * time.Second, // TCP-level keepalive
+	}).DialContext,
+}
 
 // WebSocket opcodes for the QQ Bot gateway protocol.
 const (
@@ -589,7 +600,7 @@ func (p *Platform) connectGateway(ctx context.Context) error {
 	}
 
 	// Connect WebSocket
-	conn, _, err := websocket.DefaultDialer.Dial(gatewayURL, nil)
+	conn, _, err := wsDialer.Dial(gatewayURL, nil)
 	if err != nil {
 		return fmt.Errorf("ws connect: %w", err)
 	}
@@ -727,13 +738,37 @@ func (p *Platform) waitForReady(conn *websocket.Conn) error {
 }
 
 func (p *Platform) heartbeatLoop(ctx context.Context) {
-	ticker := time.NewTicker(time.Duration(p.heartbeatMs) * time.Millisecond)
+	heartbeatInterval := time.Duration(p.heartbeatMs) * time.Millisecond
+	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
+
+	// Health check ticker runs every 10 seconds to detect dead connections faster.
+	// This provides early detection without waiting for the full heartbeat interval.
+	healthCheckInterval := 10 * time.Second
+	healthCheck := time.NewTicker(healthCheckInterval)
+	defer healthCheck.Stop()
+
+	// maxQuietTime is the maximum time without any activity before we reconnect.
+	// Set to 2x heartbeat interval to allow for normal network delays.
+	maxQuietTime := heartbeatInterval * 2
+	if maxQuietTime < 30*time.Second {
+		maxQuietTime = 30 * time.Second
+	}
+
+	lastActivity := time.Now()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-healthCheck.C:
+			// Check if connection has been quiet for too long
+			quietTime := time.Since(lastActivity)
+			if quietTime > maxQuietTime {
+				slog.Warn("qqbot: no activity for too long, reconnecting", "quiet_time", quietTime)
+				p.triggerReconnect(ctx)
+				return
+			}
 		case <-ticker.C:
 			if !p.heartbeatOK.Load() {
 				slog.Warn("qqbot: no heartbeat ACK received, reconnecting")
@@ -742,6 +777,7 @@ func (p *Platform) heartbeatLoop(ctx context.Context) {
 			}
 			p.heartbeatOK.Store(false)
 			p.sendHeartbeat()
+			lastActivity = time.Now()
 		}
 	}
 }
@@ -765,6 +801,13 @@ func (p *Platform) sendHeartbeat() {
 }
 
 func (p *Platform) readLoop(ctx context.Context) {
+	// Read timeout is set to 2x heartbeat interval to allow for network delays
+	// while still detecting dead connections before heartbeat timeout.
+	readTimeout := time.Duration(p.heartbeatMs*2) * time.Millisecond
+	if readTimeout < 30*time.Second {
+		readTimeout = 30 * time.Second // minimum 30s to avoid excessive reconnects
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -779,8 +822,15 @@ func (p *Platform) readLoop(ctx context.Context) {
 			return
 		}
 
+		// Set read deadline to detect dead connections
+		if err := conn.SetReadDeadline(time.Now().Add(readTimeout)); err != nil {
+			slog.Debug("qqbot: failed to set read deadline", "error", err)
+		}
+
 		var msg wsPayload
 		if err := conn.ReadJSON(&msg); err != nil {
+			// Clear deadline on error
+			conn.SetReadDeadline(time.Time{})
 			if ctx.Err() != nil {
 				return
 			}
@@ -788,6 +838,9 @@ func (p *Platform) readLoop(ctx context.Context) {
 			p.triggerReconnect(ctx)
 			return
 		}
+
+		// Clear deadline after successful read
+		conn.SetReadDeadline(time.Time{})
 
 		if msg.S != nil {
 			p.lastSeq.Store(*msg.S)
@@ -866,7 +919,7 @@ func (p *Platform) reconnectLoop(ctx context.Context) {
 			continue
 		}
 
-		conn, _, err := websocket.DefaultDialer.Dial(gatewayURL, nil)
+		conn, _, err := wsDialer.Dial(gatewayURL, nil)
 		if err != nil {
 			slog.Warn("qqbot: ws reconnect failed", "error", err, "attempt", attempt, "backoff", backoff)
 			backoff = min(backoff*2, maxReconnectBackoff)
@@ -926,6 +979,8 @@ func (p *Platform) reconnectLoop(ctx context.Context) {
 		}
 
 		slog.Info("qqbot: reconnected successfully")
+		// Reset heartbeat state before starting new loops
+		p.heartbeatOK.Store(true)
 		go p.heartbeatLoop(ctx)
 		go p.readLoop(ctx)
 		return
