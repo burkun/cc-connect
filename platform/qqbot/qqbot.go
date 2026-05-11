@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math/rand"
 	"net"
 	"net/http"
 	"os"
@@ -102,18 +101,15 @@ type Platform struct {
 	// Message dedup
 	dedup core.MessageDedup
 
-	// msg_seq generation: random values avoid API dedup collisions
-	// (sequential counters collide when msg_seq resets on new user messages)
+	// msg_seq generation: atomic counter for monotonic sequence numbers.
+	// Using incrementing values prevents dedup collisions (error 40054005)
+	// when sending multiple messages in quick succession.
+	msgSeq atomic.Int64
 
 	messageCacheMu   sync.Mutex
 	messageCache     map[string]cachedMessage
 	messageCachePath string
 }
-
-// msgSeqRandomMax is the upper bound for random msg_seq values.
-// Random values prevent dedup collisions when the QQ API deduplicates
-// based on (user, msg_seq) rather than (msg_id, msg_seq).
-const msgSeqRandomMax = 1_000_000
 
 type cachedMessage struct {
 	Content   string    `json:"content"`
@@ -745,6 +741,10 @@ func (p *Platform) waitForReady(conn *websocket.Conn) error {
 
 func (p *Platform) heartbeatLoop(ctx context.Context) {
 	heartbeatInterval := time.Duration(p.heartbeatMs) * time.Millisecond
+	// Enforce minimum heartbeat interval to avoid excessive reconnections
+	if heartbeatInterval < 20*time.Second {
+		heartbeatInterval = 20 * time.Second
+	}
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
 
@@ -755,11 +755,16 @@ func (p *Platform) heartbeatLoop(ctx context.Context) {
 	defer healthCheck.Stop()
 
 	// maxQuietTime is the maximum time without any activity before we reconnect.
-	// Set to 2x heartbeat interval to allow for normal network delays.
-	maxQuietTime := heartbeatInterval * 2
-	if maxQuietTime < 30*time.Second {
-		maxQuietTime = 30 * time.Second
+	// Set to 3x heartbeat interval to allow for normal network delays.
+	maxQuietTime := heartbeatInterval * 3
+	if maxQuietTime < 60*time.Second {
+		maxQuietTime = 60 * time.Second
 	}
+
+	// Allow up to 3 consecutive heartbeat failures before reconnecting
+	// to avoid reconnecting on transient network issues
+	const maxHeartbeatFailures = 3
+	heartbeatFailures := 0
 
 	lastActivity := time.Now()
 
@@ -777,9 +782,15 @@ func (p *Platform) heartbeatLoop(ctx context.Context) {
 			}
 		case <-ticker.C:
 			if !p.heartbeatOK.Load() {
-				slog.Warn("qqbot: no heartbeat ACK received, reconnecting")
-				p.triggerReconnect(ctx)
-				return
+				heartbeatFailures++
+				if heartbeatFailures >= maxHeartbeatFailures {
+					slog.Warn("qqbot: multiple heartbeat failures, reconnecting", "failures", heartbeatFailures)
+					p.triggerReconnect(ctx)
+					return
+				}
+				slog.Debug("qqbot: heartbeat ACK missed, will retry", "failures", heartbeatFailures)
+			} else {
+				heartbeatFailures = 0
 			}
 			p.heartbeatOK.Store(false)
 			p.sendHeartbeat()
@@ -807,11 +818,11 @@ func (p *Platform) sendHeartbeat() {
 }
 
 func (p *Platform) readLoop(ctx context.Context) {
-	// Read timeout is set to 2x heartbeat interval to allow for network delays
+	// Read timeout is set to 3x heartbeat interval to allow for network delays
 	// while still detecting dead connections before heartbeat timeout.
-	readTimeout := time.Duration(p.heartbeatMs*2) * time.Millisecond
-	if readTimeout < 30*time.Second {
-		readTimeout = 30 * time.Second // minimum 30s to avoid excessive reconnects
+	readTimeout := time.Duration(p.heartbeatMs*3) * time.Millisecond
+	if readTimeout < 60*time.Second {
+		readTimeout = 60 * time.Second // minimum 60s to avoid excessive reconnects
 	}
 
 	for {
@@ -1257,12 +1268,15 @@ func (p *Platform) sendMessage(rctx *replyContext, content string) error {
 	return nil
 }
 
-// nextMsgSeq returns a random message sequence number.
-// Using random values prevents deduplication errors when the QQ Bot API
-// deduplicates based on (user_openid, msg_seq) instead of (msg_id, msg_seq).
+// nextMsgSeq returns the next message sequence number.
+// Using monotonic incrementing values prevents deduplication errors (40054005)
+// when sending multiple messages in quick succession.
 // The eventMsgID parameter is retained for API compatibility but not used.
 func (p *Platform) nextMsgSeq(eventMsgID string) int32 {
-	return rand.Int31n(msgSeqRandomMax) + 1 // 1 to msgSeqRandomMax
+	seq := p.msgSeq.Add(1)
+	// Use modulo to keep within int32 positive range while maintaining uniqueness
+	// within reasonable time windows (millions of messages)
+	return int32(seq % (1 << 30))
 }
 
 // ---------------------------------------------------------------------------
