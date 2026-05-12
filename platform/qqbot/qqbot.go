@@ -101,10 +101,11 @@ type Platform struct {
 	// Message dedup
 	dedup core.MessageDedup
 
-	// msg_seq generation: atomic counter for monotonic sequence numbers.
-	// Using incrementing values prevents dedup collisions (error 40054005)
-	// when sending multiple messages in quick succession.
-	msgSeq atomic.Int64
+	// msg_seq generation: per-user atomic counters for monotonic sequence numbers.
+	// Using per-user incrementing values prevents dedup collisions (error 40054005)
+	// when sending multiple messages to the same user across different bot instances.
+	// Key: userOpenID, Value: *atomic.Int64
+	userSeq sync.Map
 
 	messageCacheMu   sync.Mutex
 	messageCache     map[string]cachedMessage
@@ -263,7 +264,7 @@ func (p *Platform) SendImage(ctx context.Context, replyCtx any, img core.ImageAt
 	}
 	if rctx.eventMsgID != "" {
 		body["msg_id"] = rctx.eventMsgID
-		body["msg_seq"] = p.nextMsgSeq(rctx.eventMsgID)
+		body["msg_seq"] = p.nextMsgSeq(rctx.userOpenID)
 	}
 
 	return p.apiRequest("POST", url, body)
@@ -427,7 +428,7 @@ func (p *Platform) sendC2CInputNotify(rctx *replyContext) {
 			"input_type":   1,
 			"input_second": 60,
 		},
-		"msg_seq": p.nextMsgSeq(rctx.eventMsgID),
+		"msg_seq": p.nextMsgSeq(rctx.userOpenID),
 	}
 	if rctx.eventMsgID != "" {
 		body["msg_id"] = rctx.eventMsgID
@@ -468,7 +469,7 @@ func (p *Platform) SendFile(ctx context.Context, replyCtx any, file core.FileAtt
 	}
 	if rctx.eventMsgID != "" {
 		body["msg_id"] = rctx.eventMsgID
-		body["msg_seq"] = p.nextMsgSeq(rctx.eventMsgID)
+		body["msg_seq"] = p.nextMsgSeq(rctx.userOpenID)
 	}
 
 	return p.apiRequest("POST", url, body)
@@ -1248,7 +1249,7 @@ func (p *Platform) sendMessage(rctx *replyContext, content string) error {
 	// Include msg_id for passive reply if available
 	if rctx.eventMsgID != "" {
 		body["msg_id"] = rctx.eventMsgID
-		body["msg_seq"] = p.nextMsgSeq(rctx.eventMsgID)
+		body["msg_seq"] = p.nextMsgSeq(rctx.userOpenID)
 	}
 
 	var resp struct {
@@ -1268,12 +1269,15 @@ func (p *Platform) sendMessage(rctx *replyContext, content string) error {
 	return nil
 }
 
-// nextMsgSeq returns the next message sequence number.
-// Using monotonic incrementing values prevents deduplication errors (40054005)
-// when sending multiple messages in quick succession.
-// The eventMsgID parameter is retained for API compatibility but not used.
-func (p *Platform) nextMsgSeq(eventMsgID string) int32 {
-	seq := p.msgSeq.Add(1)
+// nextMsgSeq returns the next message sequence number for a given user.
+// Using per-user monotonic incrementing values prevents deduplication errors (40054005)
+// when sending multiple messages to the same user across different bot instances.
+// The userOpenID is used as the key; eventMsgID is retained for API compatibility but not used.
+func (p *Platform) nextMsgSeq(userOpenID string) int32 {
+	// Load or create per-user counter
+	v, _ := p.userSeq.LoadOrStore(userOpenID, new(atomic.Int64))
+	counter := v.(*atomic.Int64)
+	seq := counter.Add(1)
 	// Use modulo to keep within int32 positive range while maintaining uniqueness
 	// within reasonable time windows (millions of messages)
 	return int32(seq % (1 << 30))

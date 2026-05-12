@@ -326,6 +326,11 @@ type interactiveState struct {
 	// the next turn (e.g. after an abnormal exit). Defaults to true (safe);
 	// cleared to false only after a clean EventResult.
 	eventsNeedResync bool
+
+	// sendFailed is true when the last turn failed to send a response to the user.
+	// When set, session.Unlock() should not update UpdatedAt to prevent the idle
+	// auto-reset from triggering prematurely (user didn't receive any response).
+	sendFailed bool
 }
 
 type pendingProviderAddState struct {
@@ -2570,6 +2575,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	state.platform = p
 	state.replyCtx = msg.ReplyCtx
 	state.currentMessageID = msg.MessageID
+	state.sendFailed = false // reset for new turn
 	state.mu.Unlock()
 	stopRecallMonitor := e.startMessageRecallMonitor(interactiveKey)
 	defer stopRecallMonitor()
@@ -3453,6 +3459,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 				state.mu.Lock()
 				p := state.platform
+				state.sendFailed = true // prevent UpdatedAt update on unlock
 				state.mu.Unlock()
 				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
 				return
@@ -4427,7 +4434,14 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 	for {
 		state.mu.Lock()
 		if len(state.pendingMessages) == 0 {
-			session.Unlock()
+			// If the last turn failed to send a response, don't update UpdatedAt.
+			// This prevents the idle auto-reset from triggering prematurely
+			// when the user didn't receive any response.
+			if state.sendFailed {
+				session.UnlockWithoutUpdate()
+			} else {
+				session.Unlock()
+			}
 			state.mu.Unlock()
 			return true
 		}
