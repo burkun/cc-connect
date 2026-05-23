@@ -71,6 +71,56 @@ func TestHandleResultNoUsage(t *testing.T) {
 	}
 }
 
+func TestHandleResultParsesNumTurns(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cs := &claudeSession{
+		events: make(chan core.Event, 8),
+		ctx:    ctx,
+	}
+	cs.sessionID.Store("test-session")
+	cs.alive.Store(true)
+
+	raw := map[string]any{
+		"type":       "result",
+		"result":     "done",
+		"session_id": "test-session",
+		"num_turns":  float64(5),
+	}
+
+	cs.handleResult(raw)
+
+	evt := <-cs.events
+	if evt.NumTurns != 5 {
+		t.Errorf("NumTurns = %d, want 5", evt.NumTurns)
+	}
+}
+
+func TestHandleResultNoNumTurns(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cs := &claudeSession{
+		events: make(chan core.Event, 8),
+		ctx:    ctx,
+	}
+	cs.sessionID.Store("test-session")
+	cs.alive.Store(true)
+
+	raw := map[string]any{
+		"type":   "result",
+		"result": "done",
+	}
+
+	cs.handleResult(raw)
+
+	evt := <-cs.events
+	if evt.NumTurns != 0 {
+		t.Errorf("NumTurns = %d, want 0", evt.NumTurns)
+	}
+}
+
 func TestReadLoop_ChildHoldsStdoutPipe(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

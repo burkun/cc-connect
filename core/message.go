@@ -226,6 +226,7 @@ type Event struct {
 	Error        error
 	InputTokens  int // token usage from agent result events
 	OutputTokens int
+	NumTurns     int            // number of turns executed (populated for goal mode results)
 	Metadata     map[string]any // optional metadata from agent (e.g. compaction_continue)
 	Synthetic    bool           // true if this is a synthetic/generated message (not from real user)
 }

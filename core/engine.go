@@ -4194,6 +4194,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 			fullResponse = cleanResponse
 
+			if event.NumTurns > 1 && !isSilent {
+				fullResponse += "\n\n" + e.i18n.Tf(MsgGoalComplete, event.NumTurns)
+			}
+
 			turnDuration := time.Since(turnStart)
 			slog.Info("turn complete",
 				"session", session.ID,
@@ -4752,6 +4756,7 @@ var builtinCommands = []struct {
 	{[]string{"web"}, "web"},
 	{[]string{"diff"}, "diff"},
 	{[]string{"ps", "btw"}, "ps"},
+	{[]string{"goal"}, "goal"},
 }
 
 func (e *Engine) cmdPs(p Platform, msg *Message, args []string) {
@@ -4783,6 +4788,18 @@ func (e *Engine) cmdPs(p Platform, msg *Message, args []string) {
 		return
 	}
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsSent))
+}
+
+// cmdGoal handles the /goal command - a passthrough that sends the goal condition
+// to the agent as a regular message. Returns false to allow fallthrough to agent.
+func (e *Engine) cmdGoal(p Platform, msg *Message, args []string) bool {
+	if len(args) == 0 {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgGoalUsage))
+		return true
+	}
+	condition := strings.Join(args, " ")
+	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgGoalStarted, condition))
+	return false // passthrough - send to agent as regular message
 }
 
 // matchPrefix finds a unique command matching the given prefix.
@@ -4967,6 +4984,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdWeb(p, msg, args)
 	case "ps":
 		e.cmdPs(p, msg, args)
+	case "goal":
+		return e.cmdGoal(p, msg, args)
 	default:
 		if custom, ok := e.commands.Resolve(cmd); ok {
 			if disabledCmds[strings.ToLower(custom.Name)] {

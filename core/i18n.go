@@ -489,6 +489,10 @@ const (
 	MsgPsEmpty           MsgKey = "ps_empty"
 	MsgPsNoSession       MsgKey = "ps_no_session"
 
+	MsgGoalUsage    MsgKey = "goal_usage"
+	MsgGoalStarted  MsgKey = "goal_started"
+	MsgGoalComplete MsgKey = "goal_complete"
+
 	MsgWhoamiTitle     MsgKey = "whoami_title"
 	MsgWhoamiCardTitle MsgKey = "whoami_card_title"
 	MsgWhoamiName      MsgKey = "whoami_name"
@@ -3139,6 +3143,27 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "目前沒有正在執行的任務。",
 		LangJapanese:           "現在実行中のタスクはありません。",
 		LangSpanish:            "No hay ninguna tarea en ejecución.",
+	},
+	MsgGoalUsage: {
+		LangEnglish:            "Usage: `/goal <condition>`\nExample: `/goal all files have no TODO comments`",
+		LangChinese:            "用法: `/goal <条件>`\n示例: `/goal 所有文件都没有 TODO 注释`",
+		LangTraditionalChinese: "用法: `/goal <條件>`\n範例: `/goal 所有檔案都沒有 TODO 註解`",
+		LangJapanese:           "使い方: `/goal <条件>`\n例: `/goal all files have no TODO comments`",
+		LangSpanish:            "Uso: `/goal <condición>`\nEjemplo: `/goal all files have no TODO comments`",
+	},
+	MsgGoalStarted: {
+		LangEnglish:            "🎯 Goal mode activated: %s",
+		LangChinese:            "🎯 目标模式已激活: %s",
+		LangTraditionalChinese: "🎯 目標模式已啟用: %s",
+		LangJapanese:           "🎯 目標モード有効: %s",
+		LangSpanish:            "🎯 Modo objetivo activado: %s",
+	},
+	MsgGoalComplete: {
+		LangEnglish:            "🎯 Goal completed in %d turns",
+		LangChinese:            "🎯 目标完成，共 %d 轮",
+		LangTraditionalChinese: "🎯 目標完成，共 %d 輪",
+		LangJapanese:           "🎯 目標達成、%d ターン完了",
+		LangSpanish:            "🎯 Objetivo completado en %d turnos",
 	},
 	MsgWhoamiTitle: {
 		LangEnglish:            "🪪 **Your Identity**",

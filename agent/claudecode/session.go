@@ -448,6 +448,11 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 		}
 	}
 
+	var numTurns int
+	if v, ok := raw["num_turns"].(float64); ok {
+		numTurns = int(v)
+	}
+
 	evt := core.Event{
 		Type:         core.EventResult,
 		Content:      content,
@@ -455,6 +460,7 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 		Done:         true,
 		InputTokens:  inputTokens,
 		OutputTokens: outputTokens,
+		NumTurns:     numTurns,
 	}
 	select {
 	case cs.events <- evt:
