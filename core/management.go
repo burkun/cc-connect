@@ -992,13 +992,13 @@ func (m *ManagementServer) handleProjectSessions(w http.ResponseWriter, r *http.
 
 		s := e.sessions.GetOrCreateActive(body.SessionKey)
 		if body.Name != "" {
-			s.Name = body.Name
+			s.SetName(body.Name)
 		}
 		e.sessions.Save()
 
 		mgmtJSON(w, http.StatusOK, map[string]any{
 			"session_key": body.SessionKey,
-			"name":        s.Name,
+			"name":        s.GetName(),
 		})
 
 	default:
@@ -1519,11 +1519,7 @@ func (m *ManagementServer) handleCron(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		cronID, err := GenerateCronID()
-			if err != nil {
-				mgmtError(w, http.StatusInternalServerError, "failed to generate cron ID: "+err.Error())
-				return
-			}
+		cronID := GenerateCronID()
 			job := &CronJob{
 				ID:          cronID,
 				Project:     project,

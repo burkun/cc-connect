@@ -33,7 +33,7 @@ PLATFORMS := \
 #   make build EXCLUDE=discord,dingtalk,qq,qqbot,line
 # ---------------------------------------------------------------------------
 
-ALL_AGENTS    := acp claudecode codex cursor devin gemini iflow kimi opencode pi qoder
+ALL_AGENTS    := acp claudecode codex cursor devin gemini iflow kimi opencode pi qoder tmux
 ALL_PLATFORMS := feishu telegram discord slack dingtalk wecom weixin qq qqbot line weibo max
 ALL_EXTRAS    := web
 
@@ -134,7 +134,7 @@ test-release: pre-test
 test-release-local:
 	go test ./tests/release_local/...
 	go test ./config
-	go test ./core -run 'TestEngineSendToSessionWithAttachments|TestCmdList_AllSessionsVisibleAfterRepeatedNew|TestCmdList_SessionVisibleDuringAgentProcessing|TestEngine_Alias|TestEngine_BannedWords|TestEngine_DisabledCommands'
+	go test ./core -run 'TestEngineSendToSessionWithAttachments|TestProcessInteractiveEvents_SuppressesDuplicateSideChannelText|TestCmdList_AllSessionsVisibleAfterRepeatedNew|TestCmdList_SessionVisibleDuringAgentProcessing|TestEngine_Alias|TestEngine_BannedWords|TestEngine_DisabledCommands'
 	go test ./platform/feishu -run 'TestUserIDFromEventFallsBackToUserID|TestResolveUserNameSkipsInvalidLookupID|TestNew_CanDisableInteractiveCards'
 
 # Legacy: runs unit tests only

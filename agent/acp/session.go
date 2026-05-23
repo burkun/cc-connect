@@ -44,9 +44,6 @@ type acpSession struct {
 	toolInputMu   sync.Mutex
 	toolInputByID map[string]string // toolCallId -> summarized tool input
 
-	closeOnce     sync.Once // ensures events channel is closed only once
-	eventsClosed  atomic.Bool
-
 	// modesMu guards availableModes and currentMode. Both fields are
 	// populated on handshake (session/new or session/load response) and
 	// updated whenever SetLiveMode succeeds or the server announces a
@@ -579,9 +576,6 @@ func (s *acpSession) handlePermissionRequest(id json.RawMessage, params json.Raw
 }
 
 func (s *acpSession) emit(ev core.Event) {
-	if s.eventsClosed.Load() {
-		return // events channel already closed, drop event
-	}
 	if ev.SessionID == "" {
 		ev.SessionID = s.currentACPSessionID()
 	}
@@ -721,37 +715,10 @@ func (s *acpSession) Close() error {
 	}()
 	select {
 	case <-done:
+		close(s.events)
 	case <-time.After(8 * time.Second):
 		slog.Warn("acp: close timed out waiting for I/O loop")
 	}
-	s.closeOnce.Do(func() {
-		s.eventsClosed.Store(true)
-		close(s.events)
-	})
-	return nil
-}
-
-// ForceClose immediately terminates the process with SIGKILL.
-// Use this after Close() times out to prevent zombie processes.
-func (s *acpSession) ForceClose() error {
-	s.alive.Store(false)
-	s.cancel()
-	if s.cmd != nil && s.cmd.Process != nil {
-		_ = s.cmd.Process.Kill()
-	}
-	done := make(chan struct{})
-	go func() {
-		s.wg.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-	}
-	s.closeOnce.Do(func() {
-		s.eventsClosed.Store(true)
-		close(s.events)
-	})
 	return nil
 }
 
