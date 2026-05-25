@@ -3552,9 +3552,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	var cardThinkingText string        // latest thinking text
 	var cardAnswerText strings.Builder // accumulated answer text
 
-	// Goal mode: collect tool records for evaluator context
-	var goalToolRecords []ToolRecord
-
+	
 	if scp, ok := state.platform.(StreamingCardPlatform); ok {
 		if sc, err := scp.CreateStreamingCard(e.ctx, state.replyCtx); err != nil {
 			slog.Warn("streaming card creation failed, falling back to normal messages", "error", err)
@@ -3912,28 +3910,6 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventToolResult:
-		// Collect tool record for goal evaluator
-		toolSuccess := false
-		if event.ToolSuccess != nil {
-			toolSuccess = *event.ToolSuccess
-		}
-		toolExitCode := 0
-		if event.ToolExitCode != nil {
-			toolExitCode = *event.ToolExitCode
-		}
-		toolResult := strings.TrimSpace(event.ToolResult)
-		if toolResult == "" {
-			toolResult = strings.TrimSpace(event.Content)
-		}
-		goalToolRecords = append(goalToolRecords, ToolRecord{
-			Name:     event.ToolName,
-			Input:    event.ToolInput,
-			Result:   toolResult,
-			Status:   event.ToolStatus,
-			Success:  toolSuccess,
-			ExitCode: toolExitCode,
-		})
-
 			if e.display.ToolMessages {
 				result := strings.TrimSpace(event.ToolResult)
 				if result == "" {
@@ -4241,10 +4217,6 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 			fullResponse = cleanResponse
 
-			if event.NumTurns > 1 && !isSilent {
-				fullResponse += "\n\n" + e.i18n.Tf(MsgGoalComplete, event.NumTurns)
-			}
-
 			turnDuration := time.Since(turnStart)
 			slog.Info("turn complete",
 				"session", session.ID,
@@ -4420,7 +4392,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 							Elapsed:   time.Since(goalState.startTime),
 							WorkDir:   goalWorkDir,
 						}
-						goalMet, goalImpossible, evalReason := e.evaluateGoal(sessionKey, goalState, session, goalToolRecords, goalCtx)
+						goalMet, goalImpossible, evalReason := e.evaluateGoal(sessionKey, goalState, session, goalCtx)
 						if goalMet {
 							e.reply(p, replyCtx, e.i18n.Tf(MsgGoalComplete, goalState.iterations+1))
 							e.clearGoalState(sessionKey)
@@ -4434,12 +4406,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 								e.clearGoalState(sessionKey)
 							} else {
 								slog.Info("goal: continuing", "iteration", goalState.iterations, "max", goalState.maxTurns, "session", sessionKey, "eval_reason", evalReason)
+								// Continue prompt: tell agent what's still needed
+								// Agent does NOT self-determine completion; evaluator (fork session) judges.
+								continuePrompt := fmt.Sprintf("Continue working toward the goal.\n\n**Goal condition**: %s\n\n**What's still needed**: %s", goalState.condition, evalReason)
 								state.mu.Lock()
 								state.pendingMessages = append(state.pendingMessages, queuedMessage{
 									messageID:     "goal-continue-" + time.Now().Format("20060102150405"),
 									platform:      p,
 									replyCtx:      replyCtx,
-									content:       "Continue working toward the goal.",
+									content:       continuePrompt,
 									fromVoice:     false,
 									userID:        "",
 									userName:      "",
@@ -4994,33 +4969,24 @@ func (e *Engine) clearGoalState(sessionKey string) {
 	state.mu.Unlock()
 }
 
-// evaluateGoal checks if the goal condition has been met using the evaluator
-// or falls back to marker detection if no evaluator is configured.
+// evaluateGoal checks if the goal condition has been met using the evaluator.
+// The evaluator forks a session to independently judge completion.
 // Returns (met, impossible, reason).
-func (e *Engine) evaluateGoal(sessionKey string, goalState *goalModeState, session *Session, tools []ToolRecord, goalCtx GoalContext) (bool, bool, string) {
-	// If no evaluator configured, fall back to marker detection
+func (e *Engine) evaluateGoal(sessionKey string, goalState *goalModeState, session *Session, goalCtx GoalContext) (bool, bool, string) {
+	// If no evaluator configured, goal mode cannot function properly
 	if e.goalEvaluator == nil {
-		history := session.GetHistory(0)
-		for i := len(history) - 1; i >= 0; i-- {
-			if history[i].Role == "assistant" {
-				content := history[i].Content
-				if strings.Contains(content, "🎯 Goal achieved") || strings.Contains(content, "Goal achieved") {
-					return true, false, "marker detected in assistant response"
-				}
-				break
-			}
-		}
-		return false, false, "no marker found"
+		slog.Warn("goal: no evaluator configured, goal mode cannot determine completion")
+		return false, false, "no evaluator configured"
 	}
 
 	// Use evaluator with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	// Pass all history; the evaluator applies token-budget truncation internally
-	history := session.GetHistory(0)
+	// Get the agent session ID for --resume --fork-session
+	agentSessionID := session.GetAgentSessionID()
 
-	result, err := e.goalEvaluator.Evaluate(ctx, goalState.condition, history, tools, goalCtx)
+	result, err := e.goalEvaluator.Evaluate(ctx, agentSessionID, goalState.condition, goalCtx)
 	if err != nil {
 		slog.Warn("goal: evaluator error", "error", err)
 		return false, false, fmt.Sprintf("evaluator error: %v", err)

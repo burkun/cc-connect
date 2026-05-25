@@ -699,16 +699,13 @@ func main() {
 			engine.SetGoalMaxTurns(cfg.Goal.MaxTurns)
 		}
 
-		// Wire goal evaluator using active provider's API key
-		if ps, ok := agent.(core.ProviderSwitcher); ok {
-			if ap := ps.GetActiveProvider(); ap != nil && ap.APIKey != "" {
-				evaluator := core.NewAnthropicGoalEvaluator(core.GoalEvaluatorCfg{
-					APIKey:  ap.APIKey,
-					BaseURL: ap.BaseURL,
-					Model:   ap.Model,
-				})
+		// Wire goal evaluator using CLI invocation (reuses agent auth, no API key needed)
+		if info, ok := agent.(core.AgentDoctorInfo); ok {
+			cliBin := info.CLIBinaryName()
+			if cliBin != "" {
+				evaluator := core.NewCLIGoalEvaluator(cliBin, workDir)
 				engine.SetGoalEvaluator(evaluator)
-				slog.Info("goal: evaluator enabled", "model", evaluator.Model)
+				slog.Info("goal: evaluator enabled", "cli", cliBin)
 			}
 		}
 

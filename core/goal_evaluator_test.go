@@ -24,182 +24,77 @@ func (p *stubGoalPlatform) Send(ctx context.Context, replyCtx any, content strin
 
 // --- goal command tests ---
 
-func TestGoalEvaluatorTokenBudget(t *testing.T) {
-	// Create evaluator with default 16k token budget
-	evaluator := NewAnthropicGoalEvaluator(GoalEvaluatorCfg{
-		APIKey: "test",
-	})
-	if evaluator.TokenBudget != 16000 {
-		t.Errorf("expected TokenBudget 16000, got %d", evaluator.TokenBudget)
+func TestCLIGoalEvaluatorDefaults(t *testing.T) {
+	evaluator := NewCLIGoalEvaluator("claude", "/tmp")
+	if evaluator.Timeout != 60*time.Second {
+		t.Errorf("expected Timeout 60s, got %v", evaluator.Timeout)
 	}
 }
 
-func TestGoalEvaluatorBuildTranscript(t *testing.T) {
-	evaluator := NewAnthropicGoalEvaluator(GoalEvaluatorCfg{APIKey: "test"})
-
-	// Test empty history
-	transcript := evaluator.buildTranscript(nil)
-	if transcript != "" {
-		t.Errorf("expected empty transcript for nil history, got %q", transcript)
+func TestParseEvalResult(t *testing.T) {
+	// Test continue=true means keep working
+	result, err := parseEvalResult(`{"continue": true, "reason": "tests still failing"}`)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	if result.Met {
+		t.Errorf("expected Met=false for continue=true")
+	}
+	if result.Reason != "tests still failing" {
+		t.Errorf("expected reason, got %q", result.Reason)
 	}
 
-	// Test single entry
-	history := []HistoryEntry{
-		{Role: "user", Content: "Hello"},
+	// Test continue=false means goal met
+	result, err = parseEvalResult(`{"continue": false, "reason": "all tests passed"}`)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
 	}
-	transcript = evaluator.buildTranscript(history)
-	if !strings.Contains(transcript, "[USER]: Hello") {
-		t.Errorf("expected [USER]: Hello in transcript, got %q", transcript)
-	}
-
-	// Test truncation of long content (1500 char limit per entry)
-	shortContent := strings.Repeat("x", 1000)
-	history = []HistoryEntry{
-		{Role: "assistant", Content: shortContent},
-	}
-	transcript = evaluator.buildTranscript(history)
-	if strings.Contains(transcript, "...[truncated]") {
-		t.Errorf("expected no truncation for 1000 chars, but got truncation")
+	if !result.Met {
+		t.Errorf("expected Met=true for continue=false")
 	}
 
-	longContent := strings.Repeat("x", 2000)
-	history = []HistoryEntry{
-		{Role: "assistant", Content: longContent},
+	// Test impossible flag
+	result, err = parseEvalResult(`{"continue": true, "impossible": true, "reason": "cannot proceed"}`)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
 	}
-	transcript = evaluator.buildTranscript(history)
-	// 1500 char limit should trigger truncation for 2000 chars
-	if !strings.Contains(transcript, "...[truncated]") {
-		t.Errorf("expected truncation for 2000 chars, got %q", transcript[:100])
+	if !result.Impossible {
+		t.Errorf("expected Impossible=true")
 	}
 
-	// Test multiple entries preserve order
-	history = []HistoryEntry{
-		{Role: "user", Content: "First"},
-		{Role: "assistant", Content: "Second"},
-		{Role: "user", Content: "Third"},
+	// Test JSON in markdown code block
+	result, err = parseEvalResult("```json\n{\"continue\": false, \"reason\": \"done\"}\n```")
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
 	}
-	transcript = evaluator.buildTranscript(history)
-	// Should contain all entries in chronological order
-	if !strings.Contains(transcript, "[USER]: First") ||
-		!strings.Contains(transcript, "[ASSISTANT]: Second") ||
-		!strings.Contains(transcript, "[USER]: Third") {
-		t.Errorf("expected all entries in order, got %q", transcript)
+	if !result.Met {
+		t.Errorf("expected Met=true from markdown block")
 	}
 }
 
-func TestGoalEvaluatorBuildTranscriptBudgetLimit(t *testing.T) {
-	evaluator := NewAnthropicGoalEvaluator(GoalEvaluatorCfg{APIKey: "test"})
-
-	// Create many entries that would exceed budget
-	// With 16k budget, history gets ~15k tokens = ~60k chars
-	// Each entry at max 1500 chars = 1500/4 = 375 tokens
-	// So roughly 40 entries should fit in 15k tokens
-	history := make([]HistoryEntry, 100)
-	for i := 0; i < 100; i++ {
-		history[i] = HistoryEntry{
-			Role:    "user",
-			Content: strings.Repeat("x", 1000), // 1000 chars = 250 tokens
-		}
+func TestExtractCLIResultText(t *testing.T) {
+	// Test single result object
+	text := extractCLIResultText(`{"result": "goal is met"}`)
+	if text != "goal is met" {
+		t.Errorf("expected 'goal is met', got %q", text)
 	}
 
-	transcript := evaluator.buildTranscript(history)
-
-	// Should have truncated due to budget
-	if !strings.Contains(transcript, "skipped") {
-		t.Errorf("expected budget truncation message, got transcript of length %d", len(transcript))
+	// Test array with result type
+	text = extractCLIResultText(`[{"type": "assistant", "content": "thinking..."}, {"type": "result", "result": "done"}]`)
+	if text != "done" {
+		t.Errorf("expected 'done', got %q", text)
 	}
 
-	// Should not exceed budget (roughly)
-	// Token budget 16k minus fixed overhead, say 15k for history = 60k chars
-	// Allow some margin
-	if len(transcript) > 70000 {
-		t.Errorf("transcript exceeds expected budget: %d chars", len(transcript))
-	}
-}
-
-func TestGoalEvaluatorBuildToolSection(t *testing.T) {
-	evaluator := NewAnthropicGoalEvaluator(GoalEvaluatorCfg{APIKey: "test"})
-
-	// Test empty tools
-	section := evaluator.buildToolSection(nil)
-	if section != "" {
-		t.Errorf("expected empty section for nil tools, got %q", section)
+	// Test array with content blocks
+	text = extractCLIResultText(`[{"type": "assistant", "content": [{"type": "text", "text": "the answer"}]}]`)
+	if text != "the answer" {
+		t.Errorf("expected 'the answer', got %q", text)
 	}
 
-	// Test single tool
-	tools := []ToolRecord{
-		{Name: "Bash", Input: "ls -la", Result: "file1.txt\nfile2.txt", Success: true},
-	}
-	section = evaluator.buildToolSection(tools)
-	if !strings.Contains(section, "Tool: Bash") ||
-		!strings.Contains(section, "Status: success") ||
-		!strings.Contains(section, "ls -la") {
-		t.Errorf("expected tool info in section, got %q", section)
-	}
-
-	// Test failed tool
-	tools = []ToolRecord{
-		{Name: "Bash", Input: "false", Result: "", Success: false, ExitCode: 1},
-	}
-	section = evaluator.buildToolSection(tools)
-	if !strings.Contains(section, "failed") {
-		t.Errorf("expected failed status, got %q", section)
-	}
-
-	// Test truncation of long result
-	longResult := strings.Repeat("y", 1000)
-	tools = []ToolRecord{
-		{Name: "Read", Result: longResult, Success: true},
-	}
-	section = evaluator.buildToolSection(tools)
-	if !strings.Contains(section, "...[truncated]") {
-		t.Errorf("expected truncation for long result, got %q", section[:200])
-	}
-}
-
-func TestGoalEvaluatorBuildGoalContextSection(t *testing.T) {
-	evaluator := NewAnthropicGoalEvaluator(GoalEvaluatorCfg{APIKey: "test"})
-
-	ctx := GoalContext{
-		Iteration: 3,
-		MaxTurns:  10,
-		Elapsed:   5 * time.Minute,
-		WorkDir:   "/home/user/project",
-	}
-	section := evaluator.buildGoalContextSection(ctx)
-
-	if !strings.Contains(section, "Iteration: 3 of 10") {
-		t.Errorf("expected iteration info, got %q", section)
-	}
-	if !strings.Contains(section, "/home/user/project") {
-		t.Errorf("expected workdir, got %q", section)
-	}
-	if !strings.Contains(section, "5m") {
-		t.Errorf("expected elapsed time, got %q", section)
-	}
-}
-
-func TestRoughTokenEstimate(t *testing.T) {
-	// Test basic estimation
-	s := "hello world" // 11 chars = ~2.75 tokens, rounds to 2
-	estimate := roughTokenEstimate(s)
-	if estimate < 2 || estimate > 3 {
-		t.Errorf("expected ~2-3 tokens for 11 chars, got %d", estimate)
-	}
-
-	// Test unicode (Chinese chars count as runes)
-	s = "你好世界" // 4 Chinese chars = 4 runes = ~1 token (each Chinese char is ~1 token)
-	estimate = roughTokenEstimate(s)
-	// Our simple estimate is chars/4, so 4/4 = 1
-	if estimate != 1 {
-		t.Errorf("expected 1 token for 4 Chinese chars, got %d", estimate)
-	}
-
-	// Test longer string
-	s = strings.Repeat("a", 1000) // 1000 chars = 250 tokens
-	estimate = roughTokenEstimate(s)
-	if estimate != 250 {
-		t.Errorf("expected 250 tokens for 1000 chars, got %d", estimate)
+	// Test raw fallback
+	text = extractCLIResultText(`plain text response`)
+	if text != "plain text response" {
+		t.Errorf("expected 'plain text response', got %q", text)
 	}
 }
 
@@ -211,15 +106,12 @@ func TestCmdGoal_Start(t *testing.T) {
 	e.SetGoalMaxTurns(10)
 	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
 
-	// Start goal mode
 	result := e.cmdGoal(p, msg, []string{"fix", "all", "tests"})
 
-	// Should return false (passthrough to agent)
 	if result {
 		t.Errorf("expected passthrough (false), got true")
 	}
 
-	// Should send start message
 	if len(p.sent) != 1 {
 		t.Fatalf("expected 1 sent message, got %d", len(p.sent))
 	}
@@ -227,7 +119,6 @@ func TestCmdGoal_Start(t *testing.T) {
 		t.Errorf("expected goal start message, got %q", p.sent[0])
 	}
 
-	// Goal state should be initialized
 	state := e.getGoalState("test:user1")
 	if state == nil || !state.active {
 		t.Errorf("expected active goal state")
@@ -242,7 +133,6 @@ func TestCmdGoal_Status(t *testing.T) {
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
 
-	// Without active goal
 	result := e.cmdGoalStatus(p, msg)
 	if !result {
 		t.Errorf("expected true (handled), got false")
@@ -251,10 +141,8 @@ func TestCmdGoal_Status(t *testing.T) {
 		t.Errorf("expected 'no goal' message, got %q", p.sent[len(p.sent)-1])
 	}
 
-	// Start goal
 	e.initGoalState("test:user1", "fix the bug")
 
-	// With active goal
 	result = e.cmdGoalStatus(p, msg)
 	if !result {
 		t.Errorf("expected true (handled), got false")
@@ -269,7 +157,6 @@ func TestCmdGoal_Clear(t *testing.T) {
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
 
-	// Without active goal
 	result := e.cmdGoalClear(p, msg)
 	if !result {
 		t.Errorf("expected true (handled), got false")
@@ -278,10 +165,8 @@ func TestCmdGoal_Clear(t *testing.T) {
 		t.Errorf("expected 'no goal' message, got %q", p.sent[len(p.sent)-1])
 	}
 
-	// Start goal
 	e.initGoalState("test:user1", "fix the bug")
 
-	// With active goal
 	result = e.cmdGoalClear(p, msg)
 	if !result {
 		t.Errorf("expected true (handled), got false")
@@ -290,7 +175,6 @@ func TestCmdGoal_Clear(t *testing.T) {
 		t.Errorf("expected 'aborted' message, got %q", p.sent[len(p.sent)-1])
 	}
 
-	// Goal should be cleared
 	state := e.getGoalState("test:user1")
 	if state != nil {
 		t.Errorf("expected nil goal state after clear, got %+v", state)
@@ -302,7 +186,6 @@ func TestGoalState_Management(t *testing.T) {
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 	e.SetGoalMaxTurns(5)
 
-	// Test initialization
 	e.initGoalState("test:user1", "write tests")
 	state := e.getGoalState("test:user1")
 	if state == nil {
@@ -321,7 +204,6 @@ func TestGoalState_Management(t *testing.T) {
 		t.Errorf("expected active=true")
 	}
 
-	// Test clear
 	e.clearGoalState("test:user1")
 	state = e.getGoalState("test:user1")
 	if state != nil {
