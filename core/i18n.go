@@ -489,9 +489,15 @@ const (
 	MsgPsEmpty           MsgKey = "ps_empty"
 	MsgPsNoSession       MsgKey = "ps_no_session"
 
-	MsgGoalUsage    MsgKey = "goal_usage"
-	MsgGoalStarted  MsgKey = "goal_started"
-	MsgGoalComplete MsgKey = "goal_complete"
+	MsgGoalUsage         MsgKey = "goal_usage"
+	MsgGoalStarted       MsgKey = "goal_started"
+	MsgGoalComplete      MsgKey = "goal_complete"
+	MsgGoalAlreadyActive MsgKey = "goal_already_active"
+	MsgGoalNotActive     MsgKey = "goal_not_active"
+	MsgGoalAborted       MsgKey = "goal_aborted"
+	MsgGoalStatusFormat  MsgKey = "goal_status_format"
+	MsgGoalMaxTurnsReached MsgKey = "goal_max_turns_reached"
+	MsgGoalImpossible      MsgKey = "goal_impossible"
 
 	MsgWhoamiTitle     MsgKey = "whoami_title"
 	MsgWhoamiCardTitle MsgKey = "whoami_card_title"
@@ -3164,6 +3170,48 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "🎯 目標完成，共 %d 輪",
 		LangJapanese:           "🎯 目標達成、%d ターン完了",
 		LangSpanish:            "🎯 Objetivo completado en %d turnos",
+	},
+	MsgGoalAlreadyActive: {
+		LangEnglish:            "Goal mode is already active: %s. Use /goal clear to abort.",
+		LangChinese:            "目标模式已激活: %s。使用 /goal clear 终止。",
+		LangTraditionalChinese: "目標模式已啟用: %s。使用 /goal clear 終止。",
+		LangJapanese:           "目標モードが既に有効: %s。/goal clear で中止。",
+		LangSpanish:            "El modo objetivo ya está activo: %s. Usa /goal clear para abortar.",
+	},
+	MsgGoalNotActive: {
+		LangEnglish:            "No goal is currently active.",
+		LangChinese:            "当前没有激活的目标。",
+		LangTraditionalChinese: "目前沒有啟用的目標。",
+		LangJapanese:           "現在アクティブな目標はありません。",
+		LangSpanish:            "No hay ningún objetivo activo actualmente.",
+	},
+	MsgGoalAborted: {
+		LangEnglish:            "🎯 Goal mode aborted.",
+		LangChinese:            "🎯 目标模式已终止。",
+		LangTraditionalChinese: "🎯 目標模式已終止。",
+		LangJapanese:           "🎯 目標モードを中止しました。",
+		LangSpanish:            "🎯 Modo objetivo abortado.",
+	},
+	MsgGoalStatusFormat: {
+		LangEnglish:            "🎯 Goal: %s\nIterations: %d/%d\nElapsed: %s",
+		LangChinese:            "🎯 目标: %s\n迭代次数: %d/%d\n已用时: %s",
+		LangTraditionalChinese: "🎯 目標: %s\n迭代次數: %d/%d\n已用時: %s",
+		LangJapanese:           "🎯 目標: %s\n繰り返し: %d/%d\n経過時間: %s",
+		LangSpanish:            "🎯 Objetivo: %s\nIteraciones: %d/%d\nTiempo: %s",
+	},
+	MsgGoalMaxTurnsReached: {
+		LangEnglish:            "🎯 Goal mode stopped after %d iterations without achieving the goal.",
+		LangChinese:            "🎯 目标模式在 %d 次迭代后停止，未能达成目标。",
+		LangTraditionalChinese: "🎯 目標模式在 %d 次迭代後停止，未能達成目標。",
+		LangJapanese:           "🎯 目標モードは%d回の繰り返し後に停止しました。",
+		LangSpanish:            "🎯 Modo objetivo detenido después de %d iteraciones.",
+	},
+	MsgGoalImpossible: {
+		LangEnglish:            "🎯 Goal is impossible: %s",
+		LangChinese:            "🎯 目标无法达成: %s",
+		LangTraditionalChinese: "🎯 目標無法達成: %s",
+		LangJapanese:           "🎯 目標は達成不可能: %s",
+		LangSpanish:            "🎯 El objetivo es imposible: %s",
 	},
 	MsgWhoamiTitle: {
 		LangEnglish:            "🪪 **Your Identity**",

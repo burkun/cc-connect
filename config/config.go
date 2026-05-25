@@ -110,6 +110,7 @@ type Config struct {
 	Bridge             BridgeConfig            `toml:"bridge"`
 	Management         ManagementConfig        `toml:"management"`
 	Hooks              []HookConfig            `toml:"hooks"`
+	Goal               GoalConfig              `toml:"goal"`
 	IdleTimeoutMins    *int                    `toml:"idle_timeout_mins,omitempty"` // max minutes between agent events; 0 = no timeout; default 120
 	// WorkspaceIdleTimeoutMins controls the workspace idle reaper timeout
 	// (multi-workspace mode) for every engine in the process. 0 disables
@@ -238,6 +239,11 @@ type RoleConfig struct {
 // RelayConfig controls bot-to-bot relay behavior.
 type RelayConfig struct {
 	TimeoutSecs *int `toml:"timeout_secs"` // max seconds to wait for relay response; 0 = disabled; default 120
+}
+
+// GoalConfig configures the goal mode evaluator.
+type GoalConfig struct {
+	MaxTurns int `toml:"max_turns"` // maximum iterations before stopping; default 10
 }
 
 // SpeechConfig configures speech-to-text for voice messages.

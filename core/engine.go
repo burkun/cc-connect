@@ -174,6 +174,8 @@ type Engine struct {
 	speech                SpeechCfg
 	tts                   *TTSCfg
 	display               DisplayCfg
+	goalMaxTurns          int
+	goalEvaluator         GoalEvaluator
 	injectSender          bool
 	attachmentSendEnabled bool
 	startedAt             time.Time
@@ -325,6 +327,7 @@ type interactiveState struct {
 	sideText               string
 	deleteMode             *deleteModeState
 	modelSwitch            *modelSwitchState
+	goalState              *goalModeState
 	pendingProviderAdd     *pendingProviderAddState
 	lastAutoCompressAt     time.Time
 	lastAutoCompressTokens int
@@ -369,6 +372,15 @@ type modelSwitchState struct {
 	phase  string
 	target string
 	result string
+}
+
+type goalModeState struct {
+	condition  string
+	iterations int
+	maxTurns   int
+	startTime  time.Time
+	active     bool
+	aborting   bool
 }
 
 // pendingPermission represents a permission request waiting for user response.
@@ -658,6 +670,16 @@ func (e *Engine) SetInjectSender(v bool) {
 // SetAttachmentSendEnabled controls whether side-channel image/file delivery is allowed.
 func (e *Engine) SetAttachmentSendEnabled(v bool) {
 	e.attachmentSendEnabled = v
+}
+
+// SetGoalMaxTurns configures the maximum iterations for goal mode.
+func (e *Engine) SetGoalMaxTurns(maxTurns int) {
+	e.goalMaxTurns = maxTurns
+}
+
+// SetGoalEvaluator configures the goal mode evaluator.
+func (e *Engine) SetGoalEvaluator(evaluator GoalEvaluator) {
+	e.goalEvaluator = evaluator
 }
 
 // SetObserveConfig enables terminal session observation.
@@ -3530,6 +3552,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	var cardThinkingText string        // latest thinking text
 	var cardAnswerText strings.Builder // accumulated answer text
 
+	// Goal mode: collect tool records for evaluator context
+	var goalToolRecords []ToolRecord
+
 	if scp, ok := state.platform.(StreamingCardPlatform); ok {
 		if sc, err := scp.CreateStreamingCard(e.ctx, state.replyCtx); err != nil {
 			slog.Warn("streaming card creation failed, falling back to normal messages", "error", err)
@@ -3887,6 +3912,28 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventToolResult:
+		// Collect tool record for goal evaluator
+		toolSuccess := false
+		if event.ToolSuccess != nil {
+			toolSuccess = *event.ToolSuccess
+		}
+		toolExitCode := 0
+		if event.ToolExitCode != nil {
+			toolExitCode = *event.ToolExitCode
+		}
+		toolResult := strings.TrimSpace(event.ToolResult)
+		if toolResult == "" {
+			toolResult = strings.TrimSpace(event.Content)
+		}
+		goalToolRecords = append(goalToolRecords, ToolRecord{
+			Name:     event.ToolName,
+			Input:    event.ToolInput,
+			Result:   toolResult,
+			Status:   event.ToolStatus,
+			Success:  toolSuccess,
+			ExitCode: toolExitCode,
+		})
+
 			if e.display.ToolMessages {
 				result := strings.TrimSpace(event.ToolResult)
 				if result == "" {
@@ -4357,6 +4404,53 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 			}
 
+
+				// Goal mode: evaluate goal condition, continue or stop.
+				state.mu.Lock()
+				goalState := state.goalState
+				goalWorkDir := state.workspaceDir
+				state.mu.Unlock()
+				if goalState != nil && goalState.active {
+					if goalState.aborting {
+						e.clearGoalState(sessionKey)
+					} else {
+						goalCtx := GoalContext{
+							Iteration: goalState.iterations + 1,
+							MaxTurns:  goalState.maxTurns,
+							Elapsed:   time.Since(goalState.startTime),
+							WorkDir:   goalWorkDir,
+						}
+						goalMet, goalImpossible, evalReason := e.evaluateGoal(sessionKey, goalState, session, goalToolRecords, goalCtx)
+						if goalMet {
+							e.reply(p, replyCtx, e.i18n.Tf(MsgGoalComplete, goalState.iterations+1))
+							e.clearGoalState(sessionKey)
+						} else if goalImpossible {
+							e.reply(p, replyCtx, e.i18n.Tf(MsgGoalImpossible, evalReason))
+							e.clearGoalState(sessionKey)
+						} else {
+							goalState.iterations++
+							if goalState.iterations >= goalState.maxTurns {
+								e.reply(p, replyCtx, e.i18n.Tf(MsgGoalMaxTurnsReached, goalState.iterations))
+								e.clearGoalState(sessionKey)
+							} else {
+								slog.Info("goal: continuing", "iteration", goalState.iterations, "max", goalState.maxTurns, "session", sessionKey, "eval_reason", evalReason)
+								state.mu.Lock()
+								state.pendingMessages = append(state.pendingMessages, queuedMessage{
+									messageID:     "goal-continue-" + time.Now().Format("20060102150405"),
+									platform:      p,
+									replyCtx:      replyCtx,
+									content:       "Continue working toward the goal.",
+									fromVoice:     false,
+									userID:        "",
+									userName:      "",
+									msgPlatform:   p.Name(),
+									msgSessionKey: sessionKey,
+								})
+								state.mu.Unlock()
+							}
+						}
+					}
+				}
 			// Check for queued messages — if present, continue the event loop
 			// for the next turn instead of returning.
 			state.mu.Lock()
@@ -4797,9 +4891,142 @@ func (e *Engine) cmdGoal(p Platform, msg *Message, args []string) bool {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgGoalUsage))
 		return true
 	}
+
+	subcmd := args[0]
+	switch subcmd {
+	case "clear", "abort", "stop":
+		return e.cmdGoalClear(p, msg)
+	case "status", "info":
+		return e.cmdGoalStatus(p, msg)
+	}
+
+	// Start goal mode
+	sessionKey := msg.SessionKey
+	existing := e.getGoalState(sessionKey)
+	if existing != nil && existing.active {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgGoalAlreadyActive, existing.condition))
+		return true
+	}
+
 	condition := strings.Join(args, " ")
 	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgGoalStarted, condition))
-	return false // passthrough - send to agent as regular message
+	e.initGoalState(sessionKey, condition)
+
+	return false // passthrough - will be handled in processInteractiveMessageWith
+}
+
+func (e *Engine) cmdGoalClear(p Platform, msg *Message) bool {
+	sessionKey := msg.SessionKey
+	goalState := e.getGoalState(sessionKey)
+	if goalState == nil || !goalState.active {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgGoalNotActive))
+		return true
+	}
+	e.clearGoalState(sessionKey)
+	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgGoalAborted))
+	return true
+}
+
+func (e *Engine) cmdGoalStatus(p Platform, msg *Message) bool {
+	sessionKey := msg.SessionKey
+	goalState := e.getGoalState(sessionKey)
+	if goalState == nil || !goalState.active {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgGoalNotActive))
+		return true
+	}
+	elapsed := time.Since(goalState.startTime).Round(time.Second)
+	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgGoalStatusFormat, goalState.condition, goalState.iterations, goalState.maxTurns, elapsed))
+	return true
+}
+
+func (e *Engine) initGoalState(sessionKey, condition string) {
+	maxTurns := e.goalMaxTurns
+	if maxTurns == 0 {
+		maxTurns = 10
+	}
+
+	interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[interactiveKey]
+	if state == nil {
+		state = &interactiveState{}
+		e.interactiveStates[interactiveKey] = state
+	}
+	e.interactiveMu.Unlock()
+
+	state.mu.Lock()
+	state.goalState = &goalModeState{
+		condition: condition,
+		maxTurns:  maxTurns,
+		startTime: time.Now(),
+		active:    true,
+	}
+	state.mu.Unlock()
+}
+
+func (e *Engine) getGoalState(sessionKey string) *goalModeState {
+	interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[interactiveKey]
+	e.interactiveMu.Unlock()
+	if state == nil {
+		return nil
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.goalState == nil {
+		return nil
+	}
+	cp := *state.goalState
+	return &cp
+}
+
+func (e *Engine) clearGoalState(sessionKey string) {
+	interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[interactiveKey]
+	e.interactiveMu.Unlock()
+	if state == nil {
+		return
+	}
+	state.mu.Lock()
+	state.goalState = nil
+	state.mu.Unlock()
+}
+
+// evaluateGoal checks if the goal condition has been met using the evaluator
+// or falls back to marker detection if no evaluator is configured.
+// Returns (met, impossible, reason).
+func (e *Engine) evaluateGoal(sessionKey string, goalState *goalModeState, session *Session, tools []ToolRecord, goalCtx GoalContext) (bool, bool, string) {
+	// If no evaluator configured, fall back to marker detection
+	if e.goalEvaluator == nil {
+		history := session.GetHistory(0)
+		for i := len(history) - 1; i >= 0; i-- {
+			if history[i].Role == "assistant" {
+				content := history[i].Content
+				if strings.Contains(content, "🎯 Goal achieved") || strings.Contains(content, "Goal achieved") {
+					return true, false, "marker detected in assistant response"
+				}
+				break
+			}
+		}
+		return false, false, "no marker found"
+	}
+
+	// Use evaluator with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Pass all history; the evaluator applies token-budget truncation internally
+	history := session.GetHistory(0)
+
+	result, err := e.goalEvaluator.Evaluate(ctx, goalState.condition, history, tools, goalCtx)
+	if err != nil {
+		slog.Warn("goal: evaluator error", "error", err)
+		return false, false, fmt.Sprintf("evaluator error: %v", err)
+	}
+
+	return result.Met, result.Impossible, result.Reason
 }
 
 // matchPrefix finds a unique command matching the given prefix.

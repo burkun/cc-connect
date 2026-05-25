@@ -694,6 +694,24 @@ func main() {
 			}
 		}
 
+		// Goal mode config
+		if cfg.Goal.MaxTurns > 0 {
+			engine.SetGoalMaxTurns(cfg.Goal.MaxTurns)
+		}
+
+		// Wire goal evaluator using active provider's API key
+		if ps, ok := agent.(core.ProviderSwitcher); ok {
+			if ap := ps.GetActiveProvider(); ap != nil && ap.APIKey != "" {
+				evaluator := core.NewAnthropicGoalEvaluator(core.GoalEvaluatorCfg{
+					APIKey:  ap.APIKey,
+					BaseURL: ap.BaseURL,
+					Model:   ap.Model,
+				})
+				engine.SetGoalEvaluator(evaluator)
+				slog.Info("goal: evaluator enabled", "model", evaluator.Model)
+			}
+		}
+
 		// Set up save callback for auto-detected language
 		if lang == core.LangAuto {
 			engine.SetLanguageSaveFunc(func(l core.Language) error {

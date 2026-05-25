@@ -468,6 +468,23 @@ level = "info" # debug, info, warn, error
 # model    = "mimo-v2.5-tts" # "mimo-v2.5-tts" | "mimo-v2.5-tts-voicedesign" | "mimo-v2.5-tts-voiceclone"
 
 # =============================================================================
+# Goal Mode / 目标模式
+# =============================================================================
+# Goal mode enables autonomous iteration until a condition is met.
+# The agent works in a loop, evaluating after each turn whether the goal is achieved.
+# 目标模式允许自主迭代，直到条件满足。Agent 在每轮后判断目标是否达成。
+#
+# Usage: /goal <condition>    e.g. /goal all tests pass and no TODO comments
+#        /goal status         show current goal progress / 显示当前目标进度
+#        /goal clear          abort goal mode / 终止目标模式
+#
+# The agent judges completion by saying "🎯 Goal achieved" in its response.
+# Agent 通过在回复中说 "🎯 Goal achieved" 来判断目标是否达成。
+#
+# [goal]
+# max_turns = 10  # maximum iterations before stopping / 最大迭代次数，默认 10
+
+# =============================================================================
 # Daemon Mode / 守护进程模式
 # =============================================================================
 # Run cc-connect as a background service (systemd user / launchd LaunchAgent).
