@@ -100,7 +100,10 @@ Evaluate whether the goal condition is satisfied based on the conversation histo
 	}
 
 	cmd := exec.CommandContext(evalCtx, e.CLIBin, args...)
-	// Use goalCtx.WorkDir if available (agent session's actual workspace), otherwise fall back to e.WorkDir
+	// Set cmd.Dir to the project directory so CLI can find session files.
+	// Session files are stored in ~/.claude/projects/<project-path-hash>/<session-id>.jsonl
+	// CLI uses current working directory to determine which project to look for.
+	// Use goalCtx.WorkDir (agent session's workspace) as the project directory.
 	workDir := goalCtx.WorkDir
 	if workDir == "" {
 		workDir = e.WorkDir
