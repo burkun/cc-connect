@@ -100,9 +100,16 @@ Evaluate whether the goal condition is satisfied based on the conversation histo
 	}
 
 	cmd := exec.CommandContext(evalCtx, e.CLIBin, args...)
-	if e.WorkDir != "" {
-		cmd.Dir = e.WorkDir
+	// Use goalCtx.WorkDir if available (agent session's actual workspace), otherwise fall back to e.WorkDir
+	workDir := goalCtx.WorkDir
+	if workDir == "" {
+		workDir = e.WorkDir
 	}
+	if workDir != "" {
+		cmd.Dir = workDir
+	}
+
+	slog.Info("goal: invoking evaluator", "session_id", sessionID, "work_dir", workDir, "iteration", goalCtx.Iteration)
 
 	out, err := cmd.Output()
 	if err != nil {

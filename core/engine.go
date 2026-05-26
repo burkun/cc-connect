@@ -2193,6 +2193,7 @@ sessionLocked:
 		"platform", msg.Platform,
 		"user", msg.UserName,
 		"session", session.ID,
+		"interactive_key", interactiveKey,
 	)
 
 	go e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, resolvedWorkspace, msg.SessionKey)
@@ -2881,8 +2882,8 @@ func (e *Engine) workspaceContext(workspace, sessionKey string) (Agent, *Session
 }
 
 // getOrCreateInteractiveStateWith accepts an optional agent override for multi-workspace mode.
-// adoptPendingFromPlaceholder copies pendingMessages from an existing placeholder
-// state to newState so queued messages are not lost when the map entry is replaced.
+// adoptPendingFromPlaceholder copies pendingMessages and goalState from an existing placeholder
+// state to newState so queued messages and goal mode are not lost when the map entry is replaced.
 // Must be called under interactiveMu.
 func adoptPendingFromPlaceholder(existing, newState *interactiveState) {
 	if existing == nil || existing == newState {
@@ -2892,6 +2893,11 @@ func adoptPendingFromPlaceholder(existing, newState *interactiveState) {
 	if len(existing.pendingMessages) > 0 {
 		newState.pendingMessages = existing.pendingMessages
 		existing.pendingMessages = nil
+	}
+	// Preserve goal state when replacing placeholder (initGoalState creates state before agent session)
+	if existing.goalState != nil {
+		newState.goalState = existing.goalState
+		existing.goalState = nil
 	}
 	existing.mu.Unlock()
 }
@@ -4382,6 +4388,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				goalState := state.goalState
 				goalWorkDir := state.workspaceDir
 				state.mu.Unlock()
+				slog.Info("goal: checking state", "session_key", sessionKey, "has_goal_state", goalState != nil, "active", goalState != nil && goalState.active, "work_dir", goalWorkDir)
 				if goalState != nil && goalState.active {
 					if goalState.aborting {
 						e.clearGoalState(sessionKey)
@@ -4394,7 +4401,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						}
 						goalMet, goalImpossible, evalReason := e.evaluateGoal(sessionKey, goalState, session, goalCtx)
 						if goalMet {
-							e.reply(p, replyCtx, e.i18n.Tf(MsgGoalComplete, goalState.iterations+1))
+							// Include evaluator's reason in completion message
+							msg := fmt.Sprintf("%s\n\n%s", e.i18n.Tf(MsgGoalComplete, goalState.iterations+1), evalReason)
+							e.reply(p, replyCtx, msg)
 							e.clearGoalState(sessionKey)
 						} else if goalImpossible {
 							e.reply(p, replyCtx, e.i18n.Tf(MsgGoalImpossible, evalReason))
@@ -4921,6 +4930,7 @@ func (e *Engine) initGoalState(sessionKey, condition string) {
 	}
 
 	interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
+	slog.Info("goal: initializing state", "session_key", sessionKey, "interactive_key", interactiveKey, "condition", condition)
 	e.interactiveMu.Lock()
 	state := e.interactiveStates[interactiveKey]
 	if state == nil {

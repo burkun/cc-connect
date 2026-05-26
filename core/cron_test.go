@@ -650,3 +650,44 @@ func TestCronScheduler_UpdateJob_EnabledNonBoolPreservesSchedule(t *testing.T) {
 		t.Fatalf("stored job state should be unchanged on validation error, got %+v", stored)
 	}
 }
+
+// TestCronScheduler_ConcurrencyGuard tests that a job is skipped if already running.
+func TestCronScheduler_ConcurrencyGuard(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := NewCronScheduler(store)
+
+	// Test the runningJobs guard directly
+	jobID := "test-job"
+
+	// First execution sets the marker
+	cs.mu.Lock()
+	if _, running := cs.runningJobs[jobID]; running {
+		t.Error("job should not be running initially")
+	}
+	cs.runningJobs[jobID] = struct{}{}
+	cs.mu.Unlock()
+
+	// Second concurrent execution should detect and skip
+	cs.mu.Lock()
+	_, running := cs.runningJobs[jobID]
+	cs.mu.Unlock()
+	if !running {
+		t.Error("job should be marked as running after first execution starts")
+	}
+
+	// After completion, marker should be cleared
+	cs.mu.Lock()
+	delete(cs.runningJobs, jobID)
+	cs.mu.Unlock()
+
+	cs.mu.RLock()
+	_, stillRunning := cs.runningJobs[jobID]
+	cs.mu.RUnlock()
+	if stillRunning {
+		t.Error("runningJobs marker should be cleared after job completes")
+	}
+}

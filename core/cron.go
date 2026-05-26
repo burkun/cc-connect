@@ -410,16 +410,18 @@ type CronScheduler struct {
 	engines       map[string]*Engine // project name → engine
 	mu            sync.RWMutex
 	entries       map[string]cron.EntryID // job ID → cron entry
+	runningJobs   map[string]struct{}     // job IDs currently executing (concurrency guard)
 	defaultSilent      bool   // global default for suppressing cron start notifications
 	defaultSessionMode string // global default session mode; "" = reuse, "new_per_run" = fresh session each run
 }
 
 func NewCronScheduler(store *CronStore) *CronScheduler {
 	return &CronScheduler{
-		store:   store,
-		cron:    cron.New(),
-		engines: make(map[string]*Engine),
-		entries: make(map[string]cron.EntryID),
+		store:       store,
+		cron:        cron.New(),
+		engines:     make(map[string]*Engine),
+		entries:     make(map[string]cron.EntryID),
+		runningJobs: make(map[string]struct{}),
 	}
 }
 
@@ -650,6 +652,23 @@ func (cs *CronScheduler) executeJob(jobID string) {
 	if job == nil || !job.Enabled {
 		return
 	}
+
+	// Concurrency guard: skip if job is already running
+	cs.mu.Lock()
+	if _, running := cs.runningJobs[jobID]; running {
+		slog.Warn("cron: job already running, skipping", "id", jobID)
+		cs.mu.Unlock()
+		return
+	}
+	cs.runningJobs[jobID] = struct{}{}
+	cs.mu.Unlock()
+
+	// Ensure running marker is cleared on exit
+	defer func() {
+		cs.mu.Lock()
+		delete(cs.runningJobs, jobID)
+		cs.mu.Unlock()
+	}()
 
 	cs.mu.RLock()
 	engine, ok := cs.engines[job.Project]
