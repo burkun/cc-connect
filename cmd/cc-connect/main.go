@@ -703,7 +703,9 @@ func main() {
 		if info, ok := agent.(core.AgentDoctorInfo); ok {
 			cliBin := info.CLIBinaryName()
 			if cliBin != "" {
-				evaluator := core.NewCLIGoalEvaluator(cliBin, workDir)
+				// Use effectiveWorkDir (after projectState override) so evaluator
+				// runs from the correct directory for --fork-session --resume
+				evaluator := core.NewCLIGoalEvaluator(cliBin, effectiveWorkDir)
 				engine.SetGoalEvaluator(evaluator)
 				slog.Info("goal: evaluator enabled", "cli", cliBin)
 			}

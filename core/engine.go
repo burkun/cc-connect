@@ -4388,10 +4388,6 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				goalState := state.goalState
 				goalWorkDir := state.workspaceDir
 				state.mu.Unlock()
-				// If workspaceDir not set on state, get from agent (may be empty during startup)
-				if goalWorkDir == "" {
-					goalWorkDir = e.commandWorkDir(e.agent, nil)
-				}
 				slog.Info("goal: checking state", "session_key", sessionKey, "has_goal_state", goalState != nil, "active", goalState != nil && goalState.active, "work_dir", goalWorkDir)
 				if goalState != nil && goalState.active {
 					if goalState.aborting {
