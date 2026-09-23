@@ -50,15 +50,39 @@ func daemonInstall(args []string) {
 		os.Exit(1)
 	}
 
-	if err := daemon.Resolve(&cfg); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+	// Fall back to the standard ~/.cc-connect location before resolving,
+	// so that daemon.Resolve's env capture (including ${ENV} placeholder
+	// scanning of the config file) and the installed service's
+	// WorkingDirectory are consistent with the config actually in use.
+	// This matches the lookup behavior of other subcommands (see main.go
+	// config resolution: ./config.toml first, then ~/.cc-connect/config.toml).
+	workDir := cfg.WorkDir
+	if workDir == "" {
+		if wd, gerr := os.Getwd(); gerr == nil {
+			workDir = wd
+		}
+	}
+	configPath := filepath.Join(workDir, "config.toml")
+	if _, err := os.Stat(configPath); err != nil {
+		if home, herr := os.UserHomeDir(); herr == nil {
+			homeConfig := filepath.Join(home, ".cc-connect", "config.toml")
+			if _, serr := os.Stat(homeConfig); serr == nil {
+				configPath = homeConfig
+				if cfg.WorkDir == "" {
+					cfg.WorkDir = filepath.Join(home, ".cc-connect")
+				}
+				fmt.Fprintf(os.Stderr, "Note: using config from %s\n", homeConfig)
+			}
+		}
+		if _, err := os.Stat(configPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: config.toml not found in %s\n", workDir)
+			fmt.Fprintf(os.Stderr, "  Use --work-dir to specify the config directory or --config to point to the config file\n")
+			os.Exit(1)
+		}
 	}
 
-	configPath := cfg.WorkDir + "/config.toml"
-	if _, err := os.Stat(configPath); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: config.toml not found in %s\n", cfg.WorkDir)
-		fmt.Fprintf(os.Stderr, "  Use --work-dir to specify the config directory or --config to point to the config file\n")
+	if err := daemon.Resolve(&cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -121,11 +145,20 @@ func parseDaemonInstallArgs(args []string) (daemon.Config, bool, error) {
 	var cfg daemon.Config
 	var force bool
 
+	// Env-based opt-out: CC_DAEMON_NO_CAPTURE_SECRETS=1 / true / yes / on
+	// triggers --no-capture-secrets without the CLI flag, for CI / container
+	// scenarios where the global env is the right configuration surface.
+	if isTruthyEnv(os.Getenv("CC_DAEMON_NO_CAPTURE_SECRETS")) {
+		cfg.NoCaptureSecrets = true
+	}
+
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch {
 		case arg == "--force":
 			force = true
+		case arg == "--no-capture-secrets":
+			cfg.NoCaptureSecrets = true
 		case arg == "--log-file":
 			value, next, err := daemonInstallFlagValue(args, i, "--log-file")
 			if err != nil {
@@ -187,6 +220,16 @@ func daemonInstallFlagValue(args []string, index int, flagName string) (string, 
 		return "", index, fmt.Errorf("missing value for %s", flagName)
 	}
 	return args[next], next, nil
+}
+
+// isTruthyEnv accepts the conventional opt-in values for boolean env vars.
+// Anything else, including "0" / "false" / "" / unset, is treated as false.
+func isTruthyEnv(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }
 
 // ── uninstall ───────────────────────────────────────────────
@@ -431,6 +474,9 @@ Install flags:
   --log-max-size N      Max log file size in MB (default: 10)
   --work-dir DIR        Directory containing config.toml (default: current dir)
   --force               Overwrite existing installation
+  --no-capture-secrets  Do not capture config.toml ${ENV} placeholders into
+                        the service file. Also enabled by setting
+                        CC_DAEMON_NO_CAPTURE_SECRETS=1 in the environment.
 
 Restart flags:
   --force               Kill existing process before restarting

@@ -12,8 +12,7 @@ const (
 	messageItemFile  = 4
 	messageItemVideo = 5
 
-	messageStateGenerating = 1
-	messageStateFinish     = 2
+	messageStateFinish = 2
 
 	sessionExpiredErrcode = -14
 
@@ -138,17 +137,13 @@ type sendMessageResp struct {
 	Errmsg  string `json:"errmsg"`
 }
 
-type weixinOutboundMsg struct {
-	FromUserID   string        `json:"from_user_id"`
-	ToUserID     string        `json:"to_user_id"`
-	ClientID     string        `json:"client_id"`
-	MessageType  int           `json:"message_type"`
-	MessageState int           `json:"message_state"`
-	ItemList     []messageItem `json:"item_list,omitempty"`
-	ContextToken string        `json:"context_token,omitempty"`
+type sendTypingReq struct {
+	IlinkUserID  string   `json:"ilink_user_id"`
+	TypingTicket string   `json:"typing_ticket"`
+	Status       int      `json:"status"`
+	BaseInfo     baseInfo `json:"base_info"`
 }
 
-// getConfig API types
 type getConfigReq struct {
 	IlinkUserID  string   `json:"ilink_user_id"`
 	ContextToken string   `json:"context_token,omitempty"`
@@ -159,18 +154,15 @@ type getConfigResp struct {
 	Ret          int    `json:"ret"`
 	Errcode      int    `json:"errcode"`
 	Errmsg       string `json:"errmsg"`
-	TypingTicket string `json:"typing_ticket,omitempty"`
+	TypingTicket string `json:"typing_ticket"`
 }
 
-// sendTyping API types
-const (
-	typingStatusTyping = 1
-	typingStatusCancel = 2
-)
-
-type sendTypingReq struct {
-	IlinkUserID  string   `json:"ilink_user_id"`
-	TypingTicket string   `json:"typing_ticket,omitempty"`
-	Status       int      `json:"status"`
-	BaseInfo     baseInfo `json:"base_info"`
+type weixinOutboundMsg struct {
+	FromUserID   string        `json:"from_user_id"`
+	ToUserID     string        `json:"to_user_id"`
+	ClientID     string        `json:"client_id"`
+	MessageType  int           `json:"message_type"`
+	MessageState int           `json:"message_state"`
+	ItemList     []messageItem `json:"item_list,omitempty"`
+	ContextToken string        `json:"context_token,omitempty"`
 }
