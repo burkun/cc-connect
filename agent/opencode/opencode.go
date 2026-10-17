@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -32,6 +33,7 @@ type Agent struct {
 	workDir              string
 	model                string
 	mode                 string
+	cliMajor             int      // detected opencode CLI major version (2 = v2+ flag semantics; 0 = unknown)
 	cmd                  string   // CLI binary name, default "opencode"
 	cliExtraArgs         []string // extra args from cmd after the binary name
 	configEnv            []string // env vars from [projects.agent.options.env]
@@ -83,10 +85,17 @@ func New(opts map[string]any) (core.Agent, error) {
 		return nil, fmt.Errorf("opencode: %q CLI not found in PATH, install from: https://github.com/opencode-ai/opencode", cmd)
 	}
 
+	// OpenCode v2 changed several CLI flags (see session.go buildRunArgs).
+	// Detect the major version once at construction so sessions can pick the
+	// right argument set, while keeping v1 compatibility.
+	cliMajor := detectOpencodeMajorVersion(cmd)
+	slog.Info("opencode: CLI detected", "cmd", cmd, "major_version", cliMajor)
+
 	return &Agent{
 		workDir:              workDir,
 		model:                model,
 		mode:                 mode,
+		cliMajor:             cliMajor,
 		cmd:                  cmd,
 		cliExtraArgs:         extraArgs,
 		configEnv:            core.ParseConfigEnv(opts),
@@ -95,6 +104,46 @@ func New(opts map[string]any) (core.Agent, error) {
 		modelCachePath:       modelCachePath,
 		persistentModelCache: persistentModelCache,
 	}, nil
+}
+
+// detectOpencodeMajorVersion probes `opencode --version` and returns the major
+// version number (e.g. 2 for "opencode v2.0.32"). It returns 0 when the CLI
+// cannot be probed or the output cannot be parsed, in which case callers keep
+// the legacy (v1) argument set.
+func detectOpencodeMajorVersion(cmd string) int {
+	out, err := exec.Command(cmd, "--version").Output()
+	if err != nil {
+		slog.Debug("opencode: version probe failed", "cmd", cmd, "err", err)
+		return 0
+	}
+	return parseMajorVersion(string(out))
+}
+
+// parseMajorVersion extracts the first integer found in s, which is the major
+// version for version strings such as "opencode v2.0.32" or "1.4.2".
+func parseMajorVersion(s string) int {
+	start := -1
+	end := -1
+	for i := 0; i < len(s); i++ {
+		if s[i] >= '0' && s[i] <= '9' {
+			if start == -1 {
+				start = i
+			}
+			end = i + 1
+			continue
+		}
+		if start != -1 {
+			break
+		}
+	}
+	if start == -1 {
+		return 0
+	}
+	n, err := strconv.Atoi(s[start:end])
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 func opencodeProjectModelCachePath(dataDir, project string) string {
@@ -493,6 +542,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	a.mu.Lock()
 	model := a.model
 	mode := a.mode
+	cliMajor := a.cliMajor
 	cmd := a.cmd
 	extraArgs := append([]string{}, a.cliExtraArgs...)
 	workDir := a.workDir
@@ -507,7 +557,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 	a.mu.Unlock()
 
-	return newOpencodeSession(ctx, cmd, extraArgs, workDir, model, mode, agentName, sessionID, extraEnv)
+	return newOpencodeSession(ctx, cmd, extraArgs, workDir, model, mode, agentName, sessionID, extraEnv, cliMajor)
 }
 
 // ListSessions runs `opencode session list` and parses the JSON output.

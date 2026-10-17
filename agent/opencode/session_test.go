@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -61,7 +62,7 @@ func TestOpencodeSessionEntry_Unmarshal(t *testing.T) {
 // the ContinueSession sentinel (__continue__) is not passed as a literal
 // session ID to the CLI. This was fixed in PR #249.
 func TestNewOpencodeSession_ContinueSessionTreatedAsFresh(t *testing.T) {
-	s, err := newOpencodeSession(context.Background(), "echo", nil, "/tmp", "", "default", "", core.ContinueSession, nil)
+	s, err := newOpencodeSession(context.Background(), "echo", nil, "/tmp", "", "default", "", core.ContinueSession, nil, 0)
 	if err != nil {
 		t.Fatalf("newOpencodeSession: %v", err)
 	}
@@ -117,6 +118,126 @@ func TestOpencodeSessionBuildRunArgsIncludesImagesAsFiles(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("args = %#v, want %#v", got, want)
+	}
+}
+
+// TestOpencodeBuildRunArgsV1KeepsDirFlag guards the legacy (opencode 1.x)
+// argument set, which requires --dir because the CLI does not derive the
+// project directory from the process working directory.
+func TestOpencodeBuildRunArgsV1KeepsDirFlag(t *testing.T) {
+	s := &opencodeSession{workDir: "/repo", model: "provider/model", mode: "yolo", cliMajor: 1}
+
+	got := s.buildRunArgs("hi", nil, "")
+	want := []string{
+		"run", "--format", "json",
+		"--model", "provider/model",
+		"--dir", "/repo",
+		"--thinking",
+		"--dangerously-skip-permissions",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("args = %#v, want %#v", got, want)
+	}
+}
+
+// TestOpencodeBuildRunArgsV2OmitsDirFlag is the regression guard for the
+// opencode 2.x breakage: v2 removed `--dir` and now rejects it with
+// "Unrecognized flag: --dir in command opencode run". The project directory is
+// taken from the process working directory instead.
+func TestOpencodeBuildRunArgsV2OmitsDirFlag(t *testing.T) {
+	s := &opencodeSession{workDir: "/repo", model: "provider/model", cliMajor: 2}
+
+	got := s.buildRunArgs("hi", nil, "")
+
+	for i, a := range got {
+		if a == "--dir" {
+			t.Fatalf("args contain --dir (index %d): %#v", i, got)
+		}
+	}
+	want := []string{
+		"run", "--format", "json",
+		"--model", "provider/model",
+		"--thinking",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("args = %#v, want %#v", got, want)
+	}
+}
+
+// TestOpencodeBuildRunArgsV2YoloUsesAuto verifies that yolo mode maps to the
+// v2 `--auto` flag instead of the removed `--dangerously-skip-permissions`.
+func TestOpencodeBuildRunArgsV2YoloUsesAuto(t *testing.T) {
+	s := &opencodeSession{workDir: "/repo", mode: "yolo", cliMajor: 2}
+
+	got := s.buildRunArgs("hi", nil, "")
+	want := []string{"run", "--format", "json", "--thinking", "--auto"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("args = %#v, want %#v", got, want)
+	}
+}
+
+// TestParseMajorVersion covers the opencode --version output shapes we need to
+// distinguish v1 (legacy flags) from v2 (new flags).
+func TestParseMajorVersion(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int
+	}{
+		{"opencode v2.0.32\n", 2},
+		{"opencode v2.0.32", 2},
+		{"1.5.1-beta.1", 1},
+		{"opencode 1.4.2", 1},
+		{"v2", 2},
+		{"no digits here", 0},
+		{"", 0},
+	}
+	for _, tc := range cases {
+		if got := parseMajorVersion(tc.in); got != tc.want {
+			t.Errorf("parseMajorVersion(%q) = %d, want %d", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestDetectOpencodeMajorVersion probes a stub CLI on disk, mirroring how New()
+// decides between v1 and v2 argument sets.
+func TestDetectOpencodeMajorVersion(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell stub is not portable to Windows")
+	}
+
+	dir := t.TempDir()
+	script := filepath.Join(dir, "opencode")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho 'opencode v2.0.32'\n"), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+	if got := detectOpencodeMajorVersion(script); got != 2 {
+		t.Errorf("detectOpencodeMajorVersion(stub v2) = %d, want 2", got)
+	}
+
+	if got := detectOpencodeMajorVersion(filepath.Join(dir, "missing-opencode")); got != 0 {
+		t.Errorf("detectOpencodeMajorVersion(missing) = %d, want 0", got)
+	}
+}
+
+// TestHandleEventCapturesSessionIDWithoutStepStart reproduces opencode 2.x
+// behavior where a turn can emit only a text event (no step_start). The session
+// ID must still be captured, otherwise --session resume breaks and every user
+// message starts a brand new conversation.
+func TestHandleEventCapturesSessionIDWithoutStepStart(t *testing.T) {
+	jsonData := `{"type":"text","sessionID":"ses_v2_only","part":{"type":"text","text":"PONG"}}`
+
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(jsonData), &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &opencodeSession{events: make(chan core.Event, 4), ctx: ctx}
+	s.handleEvent(raw)
+
+	if got := s.CurrentSessionID(); got != "ses_v2_only" {
+		t.Errorf("sessionID = %q, want %q (captured from non-step_start event)", got, "ses_v2_only")
 	}
 }
 

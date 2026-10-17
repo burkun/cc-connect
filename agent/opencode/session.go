@@ -30,6 +30,7 @@ type opencodeSession struct {
 	model             string
 	mode              string
 	agentName         string
+	cliMajor          int // detected opencode CLI major version (2 = v2+ flag semantics; 0 = unknown)
 	extraEnv          []string
 	events            chan core.Event
 	chatID            atomic.Value // stores string — OpenCode session ID
@@ -41,7 +42,7 @@ type opencodeSession struct {
 	resultSent        atomic.Bool // true when EventResult has been sent for this turn
 }
 
-func newOpencodeSession(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, agentName, resumeID string, extraEnv []string) (*opencodeSession, error) {
+func newOpencodeSession(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, agentName, resumeID string, extraEnv []string, cliMajor int) (*opencodeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	s := &opencodeSession{
@@ -51,6 +52,7 @@ func newOpencodeSession(ctx context.Context, cmd string, extraArgs []string, wor
 		model:     model,
 		mode:      mode,
 		agentName: agentName,
+		cliMajor:  cliMajor,
 		extraEnv:  extraEnv,
 		events:    make(chan core.Event, 64),
 		ctx:       sessionCtx,
@@ -168,7 +170,9 @@ func (s *opencodeSession) buildRunArgs(prompt string, imagePaths []string, chatI
 	if s.model != "" {
 		args = append(args, "--model", s.model)
 	}
-	if s.workDir != "" {
+	// OpenCode v2 removed `--dir`; the project directory is derived from the
+	// process working directory, which Send() already sets via cmd.Dir.
+	if s.workDir != "" && !s.usesV2Args() {
 		args = append(args, "--dir", s.workDir)
 	}
 
@@ -177,8 +181,13 @@ func (s *opencodeSession) buildRunArgs(prompt string, imagePaths []string, chatI
 
 	// In yolo/auto mode, skip permission prompts entirely so headless
 	// runs don't get stuck with auto-rejected external-directory ops.
+	// OpenCode v2 renamed the flag to --auto.
 	if s.mode == "yolo" {
-		args = append(args, "--dangerously-skip-permissions")
+		if s.usesV2Args() {
+			args = append(args, "--auto")
+		} else {
+			args = append(args, "--dangerously-skip-permissions")
+		}
 	}
 
 	for _, imagePath := range imagePaths {
@@ -189,6 +198,13 @@ func (s *opencodeSession) buildRunArgs(prompt string, imagePaths []string, chatI
 	}
 
 	return args
+}
+
+// usesV2Args reports whether the CLI is OpenCode v2 or newer. v2 dropped
+// `--dir` (the working directory is taken from the process cwd) and replaced
+// `--dangerously-skip-permissions` with `--auto`.
+func (s *opencodeSession) usesV2Args() bool {
+	return s.cliMajor >= 2
 }
 
 func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
@@ -258,6 +274,11 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 //	  "part": { "type": "text|tool|reasoning|step-start|step-finish", ... } }
 func (s *opencodeSession) handleEvent(raw map[string]any) {
 	eventType, _ := raw["type"].(string)
+
+	// OpenCode v2 no longer guarantees a step_start event for every turn, so
+	// capture the session ID from whichever event carries it first. Without
+	// this, --session resume would silently start a new conversation.
+	s.captureSessionID(raw)
 
 	switch eventType {
 	case "text":
@@ -477,6 +498,27 @@ func (s *opencodeSession) handleStepStart(raw map[string]any) {
 		s.chatID.Store(sessionID)
 		slog.Debug("opencodeSession: session started", "session_id", sessionID)
 	}
+}
+
+// captureSessionID records the session ID carried by an event. OpenCode v2
+// emits the session ID on every event but only sometimes as a step_start, so
+// relying on handleStepStart alone would lose the ID and break resume.
+func (s *opencodeSession) captureSessionID(raw map[string]any) {
+	sessionID, _ := raw["sessionID"].(string)
+	if sessionID == "" {
+		part, _ := raw["part"].(map[string]any)
+		if part != nil {
+			sessionID, _ = part["sessionID"].(string)
+		}
+	}
+	if sessionID == "" {
+		return
+	}
+	if current, _ := s.chatID.Load().(string); current == sessionID {
+		return
+	}
+	s.chatID.Store(sessionID)
+	slog.Debug("opencodeSession: session id captured", "session_id", sessionID)
 }
 
 func (s *opencodeSession) handleStepFinish(raw map[string]any) {
